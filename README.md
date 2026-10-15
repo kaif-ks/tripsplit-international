@@ -1,36 +1,104 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TripSplit International
 
-## Getting Started
+Production-ready app for splitting travel expenses across multiple currencies without FX conversion. Each expense uses one currency, while each trip can contain many currencies.
 
-First, run the development server:
+## What Is Implemented
+
+- Email/password authentication
+- Multiple trips and groups
+- Roles: owner, admin, member
+- Shareable trip code and manual join link
+- Expenses with:
+	- one currency per expense
+	- multiple payers
+	- split modes: equal, percentage, exact, shares
+	- negative expense support for refunds
+- Per-currency balance computation
+- Settlement transfer suggestions with simplify toggle
+- Partial settlement recording
+- Trip setting: lock new expenses after settlement starts
+- Receipt upload flow for image/PDF (no OCR)
+- CSV export for trip expenses
+- Responsive web UI
+
+## Stack
+
+- Next.js 16 (App Router)
+- TypeScript + Tailwind CSS
+- PostgreSQL (Neon recommended)
+- Drizzle ORM + drizzle-kit
+- S3-compatible receipt storage (Cloudflare R2 recommended free option)
+
+## Why Cloudflare R2 For Free Storage
+
+For this product, Cloudflare R2 is usually the best free/low-cost starting option:
+
+- S3-compatible API (works with standard SDKs)
+- No egress charges to the public internet in common scenarios
+- Simple bucket + key model for receipts
+- Good fit for image/PDF uploads
+
+## Environment Variables
+
+Copy [.env.example](.env.example) to `.env` and fill values:
+
+- `DATABASE_URL` Neon Postgres connection string
+- `JWT_SECRET` long random secret
+- `APP_URL` app base URL, for join links
+- `S3_ENDPOINT` R2/S3 endpoint URL
+- `S3_REGION` usually `auto` for R2
+- `S3_BUCKET` bucket name
+- `S3_ACCESS_KEY_ID` storage access key
+- `S3_SECRET_ACCESS_KEY` storage secret key
+- `S3_PUBLIC_BASE_URL` optional public base URL for files
+
+## Setup
+
+1. Install dependencies
+
+```bash
+npm install
+```
+
+2. Generate and apply migrations
+
+```bash
+npm run db:generate
+npm run db:migrate
+```
+
+3. Run dev server
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+4. Open http://localhost:3000
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Build Validation
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run lint
+npm run build
+```
 
-## Learn More
+## Data Model Highlights
 
-To learn more about Next.js, take a look at the following resources:
+Core tables:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `users`
+- `trips`
+- `trip_members`
+- `expenses`
+- `expense_payers`
+- `expense_splits`
+- `settlements`
+- `receipts`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Migrations are generated in [drizzle](drizzle).
 
-## Deploy on Vercel
+## Notes
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Owners/admins share the trip code or join link manually. No email invite system is required.
+- Receipt uploads are presigned URL uploads, then persisted by metadata confirmation API.
+- No FX conversion is performed; balances and transfers are always computed per original currency.
