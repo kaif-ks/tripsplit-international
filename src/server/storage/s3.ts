@@ -18,6 +18,10 @@ export function getS3Client() {
       accessKeyId: getStorageEnv("S3_ACCESS_KEY_ID"),
       secretAccessKey: getStorageEnv("S3_SECRET_ACCESS_KEY"),
     },
+    // Neon Object Storage requires path-style addressing for signed URLs.
+    forcePathStyle: true,
+    // Keep presigned PUT uploads compatible with non-empty request bodies.
+    requestChecksumCalculation: "WHEN_REQUIRED",
   });
 }
 
