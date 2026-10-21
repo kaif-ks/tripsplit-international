@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { NextRequest } from "next/server";
 import { requireUser } from "@/server/auth/require-user";
@@ -65,7 +65,8 @@ export async function GET(request: NextRequest, context: Params) {
       createdAt: receipts.createdAt,
     })
     .from(receipts)
-    .where(eq(receipts.expenseId, expenseId));
+    .where(eq(receipts.expenseId, expenseId))
+    .orderBy(desc(receipts.createdAt));
 
   return ok({ expense, payers, splits, receipts: receiptRows });
 }

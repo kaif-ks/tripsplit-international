@@ -144,6 +144,10 @@ function toUserFriendlyErrorMessage(rawMessage: string, fallback: string) {
     return "One of the selected members is no longer part of this trip.";
   }
 
+  if (message.includes("upload failed")) {
+    return "Expense was saved, but receipt upload failed. Please try uploading the receipt again.";
+  }
+
   if (message.includes("locked for")) {
     return "This trip is locked after settlements started, so this action is no longer allowed.";
   }
@@ -275,6 +279,10 @@ export function TripDetailClient({ tripId }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [transferFromFilter, setTransferFromFilter] = useState("");
   const [transferToFilter, setTransferToFilter] = useState("");
+  const [expenseSearch, setExpenseSearch] = useState("");
+  const [expenseCategoryFilter, setExpenseCategoryFilter] = useState<ExpenseCategory | "">("");
+  const [expenseCurrencyFilter, setExpenseCurrencyFilter] = useState("");
+  const [expenseSort, setExpenseSort] = useState<"newest" | "oldest" | "amountDesc" | "amountAsc">("newest");
 
   const memberName = useMemo(() => {
     const map = new Map<string, string>();
@@ -419,6 +427,73 @@ export function TripDetailClient({ tripId }: Props) {
         return true;
       }),
     [transferFromFilter, transferToFilter, transfers]
+  );
+
+  const expenseCurrencies = useMemo(
+    () => [...new Set(expenses.map((expense) => expense.currency))].sort((a, b) => a.localeCompare(b)),
+    [expenses]
+  );
+
+  const filteredExpenses = useMemo(() => {
+    const search = expenseSearch.trim().toLowerCase();
+    const rows = expenses.filter((expense) => {
+      if (expenseCategoryFilter && expense.category !== expenseCategoryFilter) {
+        return false;
+      }
+
+      if (expenseCurrencyFilter && expense.currency !== expenseCurrencyFilter) {
+        return false;
+      }
+
+      if (!search) {
+        return true;
+      }
+
+      const creatorLabel = memberName.get(expense.createdByMemberId) ?? expense.createdByMemberId;
+
+      return [
+        expense.title,
+        expense.notes ?? "",
+        expense.category,
+        expense.currency,
+        expense.splitMode,
+        creatorLabel,
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(search);
+    });
+
+    const sorted = [...rows];
+
+    if (expenseSort === "oldest") {
+      sorted.sort((left, right) => new Date(left.occurredAt).getTime() - new Date(right.occurredAt).getTime());
+      return sorted;
+    }
+
+    if (expenseSort === "amountDesc") {
+      sorted.sort((left, right) => Math.abs(right.amountCents) - Math.abs(left.amountCents));
+      return sorted;
+    }
+
+    if (expenseSort === "amountAsc") {
+      sorted.sort((left, right) => Math.abs(left.amountCents) - Math.abs(right.amountCents));
+      return sorted;
+    }
+
+    sorted.sort((left, right) => new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime());
+    return sorted;
+  }, [
+    expenseCategoryFilter,
+    expenseCurrencyFilter,
+    expenseSearch,
+    expenseSort,
+    expenses,
+    memberName,
+  ]);
+
+  const hasActiveExpenseFilters = Boolean(
+    expenseSearch.trim() || expenseCategoryFilter || expenseCurrencyFilter || expenseSort !== "newest"
   );
 
   const categorySpendSummary = useMemo(() => {
@@ -941,6 +1016,9 @@ export function TripDetailClient({ tripId }: Props) {
         ? `/api/trips/${tripId}/expenses/${editingExpenseId}`
         : `/api/trips/${tripId}/expenses`;
 
+      const isEditMode = Boolean(editingExpenseId);
+      const hasReceiptAttachment = Boolean(receiptFileForExpense);
+
       await withActionLoading(
         "save-expense",
         async () => {
@@ -952,21 +1030,40 @@ export function TripDetailClient({ tripId }: Props) {
           });
 
           const savedExpenseId = editingExpenseId ?? response.expenseId;
+          let receiptUploadFailed = false;
 
           if (receiptFileForExpense && savedExpenseId) {
-            await uploadReceiptForExpense(savedExpenseId, receiptFileForExpense);
+            try {
+              await uploadReceiptForExpense(savedExpenseId, receiptFileForExpense);
+            } catch {
+              receiptUploadFailed = true;
+            }
           }
 
           resetExpenseForm();
           await loadAll();
+
+          if (receiptUploadFailed) {
+            setToast({
+              tone: "info",
+              message: isEditMode
+                ? "Expense updated, but receipt upload failed. Please retry from Edit expense."
+                : "Expense saved, but receipt upload failed. Please retry from Edit expense.",
+            });
+            return;
+          }
+
+          if (hasReceiptAttachment) {
+            setToast({
+              tone: "success",
+              message: isEditMode ? "Expense updated and receipt uploaded" : "Expense saved and receipt uploaded",
+            });
+            return;
+          }
+
+          setToast({ tone: "success", message: isEditMode ? "Expense updated" : "Expense saved" });
         },
-        receiptFileForExpense
-          ? editingExpenseId
-            ? "Expense updated and receipt uploaded"
-            : "Expense saved and receipt uploaded"
-          : editingExpenseId
-            ? "Expense updated"
-            : "Expense saved"
+        undefined
       );
     } catch (expenseError) {
       setError(toUserFriendlyError(expenseError, "Could not save expense. Please try again."));
@@ -1144,7 +1241,25 @@ export function TripDetailClient({ tripId }: Props) {
       return;
     }
 
-    if (!window.confirm(`Settle all ${filteredTransfers.length} visible transfers now?`)) {
+    const totalsByCurrency = new Map<string, number>();
+
+    for (const transfer of filteredTransfers) {
+      totalsByCurrency.set(
+        transfer.currency,
+        (totalsByCurrency.get(transfer.currency) ?? 0) + transfer.amountCents
+      );
+    }
+
+    const totalsPreview = [...totalsByCurrency.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([currency, amountCents]) => `- ${currency}: ${formatCurrency(amountCents, currency)}`)
+      .join("\n");
+
+    if (
+      !window.confirm(
+        `Settle all ${filteredTransfers.length} visible transfers now?${totalsPreview ? `\n\nTotals:\n${totalsPreview}` : ""}`
+      )
+    ) {
       return;
     }
 
@@ -1282,6 +1397,13 @@ export function TripDetailClient({ tripId }: Props) {
     );
   }
 
+  function clearExpenseFilters() {
+    setExpenseSearch("");
+    setExpenseCategoryFilter("");
+    setExpenseCurrencyFilter("");
+    setExpenseSort("newest");
+  }
+
   function openAddExpenseForm() {
     closeExpenseDetails();
     setEditingExpenseId(null);
@@ -1343,7 +1465,11 @@ export function TripDetailClient({ tripId }: Props) {
   }
 
   return (
-    <div className="mx-auto w-full max-w-7xl flex-1 px-6 py-8 md:px-10">
+    <div
+      className={`mx-auto w-full max-w-7xl flex-1 px-4 py-6 md:px-10 md:py-8 ${
+        activeTab === "expenses" ? "pb-24 md:pb-8" : ""
+      }`}
+    >
       <div className="mb-6 flex items-center gap-3 text-sm">
         <Link href="/app" className="text-[var(--accent)] hover:underline">
           Back to trips
@@ -1352,38 +1478,42 @@ export function TripDetailClient({ tripId }: Props) {
 
       <header className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-4xl">{tripData?.trip.name || "Trip"}</h1>
+          <h1 className="text-3xl md:text-4xl">{tripData?.trip.name || "Trip"}</h1>
           <p className="text-sm text-muted">{tripData?.trip.description || "No description"}</p>
         </div>
-        <button
-          type="button"
-          className="btn-primary rounded-xl px-3 py-2 text-sm font-semibold"
-          onClick={openAddExpenseForm}
-        >
-          Add expense
-        </button>
+        {activeTab !== "expenses" ? (
+          <button
+            type="button"
+            className="btn-primary w-full rounded-xl px-3 py-2 text-sm font-semibold sm:w-auto"
+            onClick={openAddExpenseForm}
+          >
+            Add expense
+          </button>
+        ) : null}
       </header>
 
-      <div className="mb-6 flex flex-wrap gap-2">
-        {([
-          ["overview", "Overview"],
-          ["expenses", "Expenses"],
-          ["members", "Members"],
-          ["settings", "Settings"],
-        ] as Array<[ViewTab, string]>).map(([tab, label]) => (
-          <button
-            key={tab}
-            type="button"
-            className={`rounded-xl px-3 py-2 text-sm font-semibold ${
-              activeTab === tab
-                ? "bg-[var(--foreground)] text-white"
-                : "border border-[var(--line)] bg-white text-[var(--foreground)]"
-            }`}
-            onClick={() => setActiveTab(tab)}
-          >
-            {label}
-          </button>
-        ))}
+      <div className="mb-6 -mx-1 overflow-x-auto pb-1">
+        <div className="flex min-w-max gap-2 px-1">
+          {([
+            ["overview", "Overview"],
+            ["expenses", "Expenses"],
+            ["members", "Members"],
+            ["settings", "Settings"],
+          ] as Array<[ViewTab, string]>).map(([tab, label]) => (
+            <button
+              key={tab}
+              type="button"
+              className={`whitespace-nowrap rounded-xl px-3 py-2 text-sm font-semibold ${
+                activeTab === tab
+                  ? "bg-[var(--foreground)] text-white"
+                  : "border border-[var(--line)] bg-white text-[var(--foreground)]"
+              }`}
+              onClick={() => setActiveTab(tab)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {error ? <p className="mb-4 rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
@@ -1919,21 +2049,6 @@ export function TripDetailClient({ tripId }: Props) {
         </section>
         ) : null}
 
-        {activeTab === "expenses" ? (
-        <section className="card p-5 lg:col-span-2">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <h2 className="text-2xl">Expenses</h2>
-            <button
-              type="button"
-              className="btn-primary rounded-xl px-3 py-2 text-xs font-semibold"
-              onClick={openAddExpenseForm}
-            >
-              Add expense
-            </button>
-          </div>
-        </section>
-        ) : null}
-
         {activeTab === "settings" ? (
         <section className="card p-5 lg:col-span-3">
           <h2 className="mb-3 text-2xl">Trip Settings</h2>
@@ -1992,9 +2107,79 @@ export function TripDetailClient({ tripId }: Props) {
 
         {activeTab === "expenses" ? (
         <section className="card p-5 lg:col-span-3">
-          <h2 className="mb-3 text-2xl">Expense Timeline</h2>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-xl md:text-2xl">Expense Timeline</h2>
+            <div className="flex items-center gap-2">
+              <p className="text-xs text-muted">
+                Showing {filteredExpenses.length} of {expenses.length}
+              </p>
+              <button
+                type="button"
+                className="btn-primary hidden rounded-xl px-3 py-2 text-xs font-semibold sm:inline-block"
+                onClick={openAddExpenseForm}
+              >
+                Add expense
+              </button>
+            </div>
+          </div>
+
+          <div className="mb-3 grid gap-2 md:grid-cols-5">
+            <input
+              className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm md:col-span-2"
+              placeholder="Search title, notes, member, currency"
+              value={expenseSearch}
+              onChange={(event) => setExpenseSearch(event.target.value)}
+            />
+            <select
+              className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm"
+              value={expenseCategoryFilter}
+              onChange={(event) => setExpenseCategoryFilter(event.target.value as ExpenseCategory | "")}
+            >
+              <option value="">All categories</option>
+              {EXPENSE_CATEGORIES.map((category) => (
+                <option key={`expense-filter-category-${category}`} value={category}>
+                  {formatCategoryLabel(category)}
+                </option>
+              ))}
+            </select>
+            <select
+              className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm"
+              value={expenseCurrencyFilter}
+              onChange={(event) => setExpenseCurrencyFilter(event.target.value)}
+            >
+              <option value="">All currencies</option>
+              {expenseCurrencies.map((currency) => (
+                <option key={`expense-filter-currency-${currency}`} value={currency}>
+                  {currency}
+                </option>
+              ))}
+            </select>
+            <div className="flex gap-2">
+              <select
+                className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm"
+                value={expenseSort}
+                onChange={(event) =>
+                  setExpenseSort(event.target.value as "newest" | "oldest" | "amountDesc" | "amountAsc")
+                }
+              >
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="amountDesc">Largest amount</option>
+                <option value="amountAsc">Smallest amount</option>
+              </select>
+              <button
+                type="button"
+                className="btn-secondary rounded-xl px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!hasActiveExpenseFilters}
+                onClick={clearExpenseFilters}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+
           <div className="grid gap-2">
-            {expenses.map((expense) => (
+            {filteredExpenses.map((expense) => (
               <div key={expense.id} className="rounded-xl border border-[var(--line)] bg-white p-3 text-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="font-semibold">{expense.title}</p>
@@ -2033,11 +2218,20 @@ export function TripDetailClient({ tripId }: Props) {
                 <p className="text-xs uppercase tracking-wide text-muted">{expense.splitMode} split</p>
                 <p className="mt-1 text-xs text-muted capitalize">Category: {expense.category}</p>
                 {expense.notes ? <p className="mt-1 text-muted">{expense.notes}</p> : null}
+                <p className="mt-1 text-xs text-muted">
+                  Added by {memberName.get(expense.createdByMemberId) ?? expense.createdByMemberId}
+                </p>
                 <p className="mt-1 text-xs text-muted">Occurred at {new Date(expense.occurredAt).toLocaleString()}</p>
                 <p className="mt-1 text-xs text-muted">Expense ID: {expense.id}</p>
               </div>
             ))}
-            {!expenses.length ? <p className="text-sm text-muted">No expenses yet.</p> : null}
+            {!filteredExpenses.length ? (
+              <p className="text-sm text-muted">
+                {expenses.length && hasActiveExpenseFilters
+                  ? "No expenses match current filters."
+                  : "No expenses yet."}
+              </p>
+            ) : null}
           </div>
         </section>
         ) : null}
@@ -2075,9 +2269,21 @@ export function TripDetailClient({ tripId }: Props) {
         ) : null}
       </div>
 
+      {activeTab === "expenses" && !showExpenseForm && !editingExpenseId && !viewingExpenseId ? (
+        <div className="fixed inset-x-4 bottom-4 z-30 sm:hidden">
+          <button
+            type="button"
+            className="btn-primary w-full rounded-xl px-4 py-3 text-sm font-semibold shadow-lg"
+            onClick={openAddExpenseForm}
+          >
+            Add expense
+          </button>
+        </div>
+      ) : null}
+
       {viewingExpenseId && viewingExpenseDetail ? (
-        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-10">
-          <div className="card w-full max-w-3xl p-5">
+        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-4 md:py-10">
+          <div className="card max-h-[90vh] w-full max-w-3xl overflow-y-auto p-5">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h2 className="text-2xl">Expense Details</h2>
               <button
@@ -2208,8 +2414,8 @@ export function TripDetailClient({ tripId }: Props) {
       ) : null}
 
       {showExpenseForm || editingExpenseId ? (
-        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-10">
-          <div className="card w-full max-w-4xl p-5">
+        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-4 md:py-10">
+          <div className="card max-h-[90vh] w-full max-w-4xl overflow-y-auto p-5">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h2 className="text-2xl">{editingExpenseId ? "Edit Expense" : "Add Expense"}</h2>
               <button
