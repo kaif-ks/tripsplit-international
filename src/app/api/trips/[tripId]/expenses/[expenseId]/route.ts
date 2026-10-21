@@ -7,6 +7,7 @@ import {
   expensePayers,
   expenses,
   expenseSplits,
+  receipts,
   settlements,
   tripMembers,
   trips,
@@ -54,8 +55,19 @@ export async function GET(request: NextRequest, context: Params) {
 
   const payers = await db.select().from(expensePayers).where(eq(expensePayers.expenseId, expenseId));
   const splits = await db.select().from(expenseSplits).where(eq(expenseSplits.expenseId, expenseId));
+  const receiptRows = await db
+    .select({
+      id: receipts.id,
+      fileName: receipts.fileName,
+      mimeType: receipts.mimeType,
+      sizeBytes: receipts.sizeBytes,
+      uploadedByMemberId: receipts.uploadedByMemberId,
+      createdAt: receipts.createdAt,
+    })
+    .from(receipts)
+    .where(eq(receipts.expenseId, expenseId));
 
-  return ok({ expense, payers, splits });
+  return ok({ expense, payers, splits, receipts: receiptRows });
 }
 
 export async function PATCH(request: NextRequest, context: Params) {

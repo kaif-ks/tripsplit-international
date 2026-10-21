@@ -47,6 +47,15 @@ type DeletedExpense = Expense & {
   deletedByMemberId: string | null;
 };
 
+type ExpenseReceipt = {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  uploadedByMemberId: string;
+  createdAt: string;
+};
+
 type ExpenseDetailResponse = {
   expense: Expense;
   payers: Array<{
@@ -59,6 +68,7 @@ type ExpenseDetailResponse = {
     percentageBp: number | null;
     shares: number | null;
   }>;
+  receipts: ExpenseReceipt[];
 };
 
 type Transfer = {
@@ -204,6 +214,18 @@ function formatCategoryLabel(category: ExpenseCategory) {
     .join(" ");
 }
 
+function formatFileSize(sizeBytes: number) {
+  if (sizeBytes >= 1024 * 1024) {
+    return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  if (sizeBytes >= 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${sizeBytes} B`;
+}
+
 export function TripDetailClient({ tripId }: Props) {
   const [tripData, setTripData] = useState<TripData | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -217,6 +239,8 @@ export function TripDetailClient({ tripId }: Props) {
   const [error, setError] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
   const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
+  const [viewingExpenseId, setViewingExpenseId] = useState<string | null>(null);
+  const [viewingExpenseDetail, setViewingExpenseDetail] = useState<ExpenseDetailResponse | null>(null);
   const [expenseTitle, setExpenseTitle] = useState("");
   const [expenseNotes, setExpenseNotes] = useState("");
   const [expenseCurrency, setExpenseCurrency] = useState("USD");
@@ -791,6 +815,28 @@ export function TripDetailClient({ tripId }: Props) {
     setShowExpenseForm(false);
   }
 
+  function closeExpenseDetails() {
+    setViewingExpenseId(null);
+    setViewingExpenseDetail(null);
+  }
+
+  async function openExpenseDetails(expenseId: string) {
+    const actionKey = `view-expense-${expenseId}`;
+
+    try {
+      setActionLoading((current) => ({ ...current, [actionKey]: true }));
+      setError("");
+      const data = await api<ExpenseDetailResponse>(`/api/trips/${tripId}/expenses/${expenseId}`);
+
+      setViewingExpenseId(expenseId);
+      setViewingExpenseDetail(data);
+    } catch (detailError) {
+      setError(toUserFriendlyError(detailError, "Could not load expense details."));
+    } finally {
+      setActionLoading((current) => ({ ...current, [actionKey]: false }));
+    }
+  }
+
   async function uploadReceiptForExpense(expenseId: string, file: File) {
     const presign = await api<{ uploadUrl: string; storageKey: string }>("/api/receipts/presign", {
       method: "POST",
@@ -935,6 +981,7 @@ export function TripDetailClient({ tripId }: Props) {
       setError("");
       const data = await api<ExpenseDetailResponse>(`/api/trips/${tripId}/expenses/${expenseId}`);
 
+      closeExpenseDetails();
       setEditingExpenseId(expenseId);
       setExpenseTitle(data.expense.title);
       setExpenseCategory(data.expense.category);
@@ -991,6 +1038,10 @@ export function TripDetailClient({ tripId }: Props) {
 
           if (editingExpenseId === expenseId) {
             resetExpenseForm();
+          }
+
+          if (viewingExpenseId === expenseId) {
+            closeExpenseDetails();
           }
 
           await loadAll();
@@ -1232,6 +1283,7 @@ export function TripDetailClient({ tripId }: Props) {
   }
 
   function openAddExpenseForm() {
+    closeExpenseDetails();
     setEditingExpenseId(null);
     setExpenseTitle("");
     setExpenseCategory("other");
@@ -1948,6 +2000,14 @@ export function TripDetailClient({ tripId }: Props) {
                   <p className="font-semibold">{expense.title}</p>
                   <div className="flex items-center gap-2">
                     <p className="text-muted">{formatCurrency(expense.amountCents, expense.currency)}</p>
+                    <button
+                      type="button"
+                      className="btn-secondary rounded-lg px-2 py-1 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isActionLoading(`view-expense-${expense.id}`)}
+                      onClick={() => void openExpenseDetails(expense.id)}
+                    >
+                      {isActionLoading(`view-expense-${expense.id}`) ? "Opening..." : "Details"}
+                    </button>
                     {canManageExpense(expense) ? (
                       <>
                         <button
@@ -2014,6 +2074,138 @@ export function TripDetailClient({ tripId }: Props) {
         </section>
         ) : null}
       </div>
+
+      {viewingExpenseId && viewingExpenseDetail ? (
+        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-10">
+          <div className="card w-full max-w-3xl p-5">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h2 className="text-2xl">Expense Details</h2>
+              <button
+                type="button"
+                className="btn-secondary rounded-xl px-3 py-2 text-xs font-semibold"
+                onClick={closeExpenseDetails}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="rounded-xl border border-[var(--line)] bg-white p-3 text-sm">
+                <p className="text-xs uppercase tracking-wide text-muted">Title</p>
+                <p className="font-semibold">{viewingExpenseDetail.expense.title}</p>
+                <p className="mt-2 text-xs uppercase tracking-wide text-muted">Category</p>
+                <p>{formatCategoryLabel(viewingExpenseDetail.expense.category)}</p>
+                <p className="mt-2 text-xs uppercase tracking-wide text-muted">Amount</p>
+                <p className="font-semibold">
+                  {formatCurrency(
+                    viewingExpenseDetail.expense.amountCents,
+                    viewingExpenseDetail.expense.currency
+                  )}
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-[var(--line)] bg-white p-3 text-sm">
+                <p className="text-xs uppercase tracking-wide text-muted">Split mode</p>
+                <p className="capitalize">{viewingExpenseDetail.expense.splitMode}</p>
+                <p className="mt-2 text-xs uppercase tracking-wide text-muted">Occurred at</p>
+                <p>{new Date(viewingExpenseDetail.expense.occurredAt).toLocaleString()}</p>
+                <p className="mt-2 text-xs uppercase tracking-wide text-muted">Created by</p>
+                <p>
+                  {memberName.get(viewingExpenseDetail.expense.createdByMemberId) ??
+                    viewingExpenseDetail.expense.createdByMemberId}
+                </p>
+              </div>
+            </div>
+
+            {viewingExpenseDetail.expense.notes ? (
+              <div className="mt-3 rounded-xl border border-[var(--line)] bg-white p-3 text-sm">
+                <p className="text-xs uppercase tracking-wide text-muted">Notes</p>
+                <p>{viewingExpenseDetail.expense.notes}</p>
+              </div>
+            ) : null}
+
+            <div className="mt-3 rounded-xl border border-[var(--line)] bg-white p-3 text-sm">
+              <p className="mb-2 font-semibold">Payers</p>
+              <div className="space-y-1">
+                {viewingExpenseDetail.payers.map((payer) => (
+                  <div key={`detail-payer-${payer.memberId}`} className="flex items-center justify-between gap-2">
+                    <p>{memberName.get(payer.memberId) ?? payer.memberId}</p>
+                    <p className="font-medium">
+                      {formatCurrency(payer.amountCents, viewingExpenseDetail.expense.currency)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-xl border border-[var(--line)] bg-white p-3 text-sm">
+              <p className="mb-2 font-semibold">Split details</p>
+              {viewingExpenseDetail.expense.splitMode === "equal" ? (
+                <p>
+                  Shared equally among{" "}
+                  {viewingExpenseDetail.splits
+                    .map((split) => memberName.get(split.memberId) ?? split.memberId)
+                    .join(", ")}
+                </p>
+              ) : (
+                <div className="space-y-1">
+                  {viewingExpenseDetail.splits.map((split) => {
+                    let valueLabel = "";
+
+                    if (viewingExpenseDetail.expense.splitMode === "percentage") {
+                      valueLabel = `${((split.percentageBp ?? 0) / 100).toFixed(2)}%`;
+                    } else if (viewingExpenseDetail.expense.splitMode === "shares") {
+                      valueLabel = `${split.shares ?? 0} shares`;
+                    } else {
+                      valueLabel = formatCurrency(
+                        split.amountCents ?? 0,
+                        viewingExpenseDetail.expense.currency
+                      );
+                    }
+
+                    return (
+                      <div key={`detail-split-${split.memberId}`} className="flex items-center justify-between gap-2">
+                        <p>{memberName.get(split.memberId) ?? split.memberId}</p>
+                        <p className="font-medium">{valueLabel}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-3 rounded-xl border border-[var(--line)] bg-white p-3 text-sm">
+              <p className="mb-2 font-semibold">Receipts</p>
+              {viewingExpenseDetail.receipts.length ? (
+                <div className="space-y-2">
+                  {viewingExpenseDetail.receipts.map((receipt) => (
+                    <div key={receipt.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--line)] px-3 py-2">
+                      <div>
+                        <p className="font-medium">{receipt.fileName}</p>
+                        <p className="text-xs text-muted">
+                          {receipt.mimeType} • {formatFileSize(receipt.sizeBytes)} • uploaded by{" "}
+                          {memberName.get(receipt.uploadedByMemberId) ?? receipt.uploadedByMemberId} •{" "}
+                          {new Date(receipt.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                      <a
+                        className="btn-secondary rounded-lg px-2 py-1 text-xs font-semibold"
+                        href={`/api/trips/${tripId}/expenses/${viewingExpenseId}/receipts/${receipt.id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open
+                      </a>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-muted">No receipts uploaded for this expense.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showExpenseForm || editingExpenseId ? (
         <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-10">
