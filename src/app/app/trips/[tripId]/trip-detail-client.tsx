@@ -567,10 +567,15 @@ export function TripDetailClient({ tripId }: Props) {
 
   const requestableFilteredTransfers = useMemo(
     () =>
-      filteredTransfers.filter(
-        (transfer) =>
-          canRequestSettlementForAnyMember || transfer.fromMemberId === tripData?.membership.id
-      ),
+      filteredTransfers.filter((transfer) => {
+        const isCurrentMemberReceiver = transfer.toMemberId === tripData?.membership.id;
+
+        if (isCurrentMemberReceiver) {
+          return false;
+        }
+
+        return canRequestSettlementForAnyMember || transfer.fromMemberId === tripData?.membership.id;
+      }),
     [canRequestSettlementForAnyMember, filteredTransfers, tripData?.membership.id]
   );
 
@@ -1512,6 +1517,14 @@ export function TripDetailClient({ tripId }: Props) {
   async function settleTransfer(transfer: Transfer) {
     const key = transferKey(transfer);
 
+    if (
+      transfer.toMemberId === tripData?.membership.id &&
+      transfer.fromMemberId !== tripData?.membership.id
+    ) {
+      setError("Receiver cannot request settlement for this transfer.");
+      return;
+    }
+
     if (!canRequestSettlementForAnyMember && transfer.fromMemberId !== tripData?.membership.id) {
       setError("Only the paying member can request this settlement.");
       return;
@@ -2121,9 +2134,11 @@ export function TripDetailClient({ tripId }: Props) {
                   filteredTransfers.map((transfer, index) => {
                     const key = transferKey(transfer);
                     const quote = transferFxByKey.get(key);
+                    const isCurrentMemberReceiver = transfer.toMemberId === tripData?.membership.id;
                     const canRequestTransfer =
-                      canRequestSettlementForAnyMember ||
-                      transfer.fromMemberId === tripData?.membership.id;
+                      !isCurrentMemberReceiver &&
+                      (canRequestSettlementForAnyMember ||
+                        transfer.fromMemberId === tripData?.membership.id);
 
                     return (
                       <div
@@ -2144,7 +2159,9 @@ export function TripDetailClient({ tripId }: Props) {
                           >
                             {settlingTransferKey === key
                               ? "Requesting..."
-                              : canRequestTransfer
+                              : isCurrentMemberReceiver
+                                ? "Waiting for payer"
+                                : canRequestTransfer
                                 ? "Request settle"
                                 : "Only payer can request"}
                           </button>
