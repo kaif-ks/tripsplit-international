@@ -88,7 +88,7 @@ type TransferFxQuote = {
   targetAmountCents: number;
   rate: number;
   quotedAt: string;
-  source: "frankfurter" | "identity";
+  source: "frankfurter" | "open-er-api" | "identity";
 };
 
 type Balance = {
