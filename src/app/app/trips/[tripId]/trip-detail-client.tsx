@@ -91,6 +91,8 @@ type TransferFxQuote = {
   source: "frankfurter" | "open-er-api" | "identity";
 };
 
+type SettlementStatus = "pending" | "approved" | "rejected";
+
 type Balance = {
   memberId: string;
   currency: string;
@@ -106,6 +108,9 @@ type Settlement = {
   amountCents: number;
   paidAt: string;
   notes: string | null;
+  status: SettlementStatus;
+  reviewedByMemberId: string | null;
+  reviewedAt: string | null;
   createdByMemberId: string;
   createdAt: string;
 };
@@ -416,6 +421,9 @@ export function TripDetailClient({ tripId }: Props) {
     [settlements]
   );
 
+  const canRequestSettlementForAnyMember =
+    tripData?.membership.role === "owner" || tripData?.membership.role === "admin";
+
   const selectableCurrencies = useMemo(() => {
     const dynamic = [
       ...expenses.map((expense) => expense.currency),
@@ -435,13 +443,36 @@ export function TripDetailClient({ tripId }: Props) {
     () =>
       [...settlements].sort(
         (left, right) =>
-          new Date(right.paidAt).getTime() - new Date(left.paidAt).getTime() ||
-          new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
+          new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime() ||
+          new Date(right.paidAt).getTime() - new Date(left.paidAt).getTime()
       ),
     [settlements]
   );
 
-  const latestSettlement = sortedSettlements[0] ?? null;
+  const approvedSettlements = useMemo(
+    () => sortedSettlements.filter((settlement) => settlement.status === "approved"),
+    [sortedSettlements]
+  );
+
+  const latestSettlement = approvedSettlements[0] ?? null;
+
+  const pendingIncomingSettlements = useMemo(
+    () =>
+      sortedSettlements.filter(
+        (settlement) =>
+          settlement.status === "pending" && settlement.toMemberId === tripData?.membership.id
+      ),
+    [sortedSettlements, tripData?.membership.id]
+  );
+
+  const pendingOutgoingSettlements = useMemo(
+    () =>
+      sortedSettlements.filter(
+        (settlement) =>
+          settlement.status === "pending" && settlement.fromMemberId === tripData?.membership.id
+      ),
+    [sortedSettlements, tripData?.membership.id]
+  );
 
   const filteredSettlements = useMemo(() => {
     const search = settlementSearch.trim().toLowerCase();
@@ -482,8 +513,19 @@ export function TripDetailClient({ tripId }: Props) {
       const fromLabel = memberName.get(settlement.fromMemberId) ?? settlement.fromMemberId;
       const toLabel = memberName.get(settlement.toMemberId) ?? settlement.toMemberId;
       const amountLabel = formatCurrency(settlement.amountCents, settlement.currency);
+      const reviewerLabel = settlement.reviewedByMemberId
+        ? memberName.get(settlement.reviewedByMemberId) ?? settlement.reviewedByMemberId
+        : "";
 
-      return [settlement.currency, settlement.notes ?? "", fromLabel, toLabel, amountLabel]
+      return [
+        settlement.currency,
+        settlement.notes ?? "",
+        settlement.status,
+        reviewerLabel,
+        fromLabel,
+        toLabel,
+        amountLabel,
+      ]
         .join(" ")
         .toLowerCase()
         .includes(search);
@@ -521,6 +563,15 @@ export function TripDetailClient({ tripId }: Props) {
         return true;
       }),
     [transferFromFilter, transferToFilter, transfers]
+  );
+
+  const requestableFilteredTransfers = useMemo(
+    () =>
+      filteredTransfers.filter(
+        (transfer) =>
+          canRequestSettlementForAnyMember || transfer.fromMemberId === tripData?.membership.id
+      ),
+    [canRequestSettlementForAnyMember, filteredTransfers, tripData?.membership.id]
   );
 
   const expenseCurrencies = useMemo(
@@ -812,11 +863,18 @@ export function TripDetailClient({ tripId }: Props) {
       setEqualSplitMemberIds((current) =>
         current.length ? current : membersResponse.members.map((member) => member.id)
       );
-      setSettlementFrom((current) => current || membersResponse.members[0]?.id || "");
-      setSettlementTo(
-        (current) =>
-          current || membersResponse.members[Math.min(1, membersResponse.members.length - 1)]?.id || ""
-      );
+      setSettlementFrom((current) => current || trip.membership.id || membersResponse.members[0]?.id || "");
+      setSettlementTo((current) => {
+        if (current) {
+          return current;
+        }
+
+        const firstDifferentMember = membersResponse.members.find(
+          (member) => member.id !== trip.membership.id
+        );
+
+        return firstDifferentMember?.id ?? "";
+      });
       setExpenses(expensesResponse.expenses);
       setDeletedExpenses(expensesResponse.deletedExpenses);
       setBalances(balanceResponse.balances);
@@ -1416,15 +1474,49 @@ export function TripDetailClient({ tripId }: Props) {
           setSettlementAmount("");
           await loadAll();
         },
-        "Settlement added"
+        "Settlement request sent"
       );
     } catch (settlementError) {
-      setError(toUserFriendlyError(settlementError, "Could not add settlement."));
+      setError(toUserFriendlyError(settlementError, "Could not request settlement."));
+    }
+  }
+
+  async function reviewSettlementRequest(settlementId: string, action: "approve" | "reject") {
+    const actionKey = `${action}-settlement-${settlementId}`;
+
+    try {
+      await withActionLoading(
+        actionKey,
+        async () => {
+          await api(`/api/trips/${tripId}/settlements/${settlementId}`, {
+            method: "PATCH",
+            body: JSON.stringify({ action }),
+          });
+
+          await loadAll();
+        },
+        action === "approve" ? "Settlement approved" : "Settlement rejected"
+      );
+    } catch (reviewError) {
+      setError(
+        toUserFriendlyError(
+          reviewError,
+          action === "approve"
+            ? "Could not approve this settlement request."
+            : "Could not reject this settlement request."
+        )
+      );
     }
   }
 
   async function settleTransfer(transfer: Transfer) {
     const key = transferKey(transfer);
+
+    if (!canRequestSettlementForAnyMember && transfer.fromMemberId !== tripData?.membership.id) {
+      setError("Only the paying member can request this settlement.");
+      return;
+    }
+
     setError("");
     setSettlingTransferKey(key);
     const idempotencyKey = createIdempotencyKey(`transfer-${key.replaceAll(":", "-")}`);
@@ -1433,9 +1525,9 @@ export function TripDetailClient({ tripId }: Props) {
       await createSettlementFromTransfer(transfer, idempotencyKey);
 
       await loadAll();
-      setToast({ tone: "success", message: "Transfer settled" });
+      setToast({ tone: "success", message: "Settlement request sent" });
     } catch (settleError) {
-      setError(toUserFriendlyError(settleError, "Could not settle this transfer."));
+      setError(toUserFriendlyError(settleError, "Could not request this settlement."));
     } finally {
       setSettlingTransferKey(null);
     }
@@ -1460,13 +1552,13 @@ export function TripDetailClient({ tripId }: Props) {
   }
 
   async function settleAllVisibleTransfers() {
-    if (!filteredTransfers.length) {
+    if (!requestableFilteredTransfers.length) {
       return;
     }
 
     const totalsByCurrency = new Map<string, number>();
 
-    for (const transfer of filteredTransfers) {
+    for (const transfer of requestableFilteredTransfers) {
       totalsByCurrency.set(
         transfer.currency,
         (totalsByCurrency.get(transfer.currency) ?? 0) + transfer.amountCents
@@ -1480,7 +1572,7 @@ export function TripDetailClient({ tripId }: Props) {
 
     if (
       !window.confirm(
-        `Settle all ${filteredTransfers.length} visible transfers now?${totalsPreview ? `\n\nTotals:\n${totalsPreview}` : ""}`
+        `Request settlement approval for all ${requestableFilteredTransfers.length} visible transfers now?${totalsPreview ? `\n\nTotals:\n${totalsPreview}` : ""}`
       )
     ) {
       return;
@@ -1491,25 +1583,25 @@ export function TripDetailClient({ tripId }: Props) {
 
     try {
       const failures: string[] = [];
-      let settledCount = 0;
+      let requestedCount = 0;
 
-      for (const transfer of filteredTransfers) {
+      for (const transfer of requestableFilteredTransfers) {
         try {
           const key = transferKey(transfer);
           const idempotencyKey = createIdempotencyKey(`bulk-${key.replaceAll(":", "-")}`);
           await createSettlementFromTransfer(transfer, idempotencyKey);
-          settledCount += 1;
+          requestedCount += 1;
         } catch (transferError) {
           const fromLabel = memberName.get(transfer.fromMemberId) ?? transfer.fromMemberId;
           const toLabel = memberName.get(transfer.toMemberId) ?? transfer.toMemberId;
-          const reason = toUserFriendlyError(transferError, "Could not settle this transfer");
+          const reason = toUserFriendlyError(transferError, "Could not request this settlement");
           failures.push(
             `${fromLabel} -> ${toLabel} ${formatCurrency(transfer.amountCents, transfer.currency)} (${reason})`
           );
         }
       }
 
-      if (settledCount > 0) {
+      if (requestedCount > 0) {
         await loadAll();
       }
 
@@ -1517,14 +1609,14 @@ export function TripDetailClient({ tripId }: Props) {
         const preview = failures.slice(0, 2).join(" | ");
         const more = failures.length > 2 ? ` and ${failures.length - 2} more` : "";
         setError(
-          `Settled ${settledCount}/${filteredTransfers.length}. Failed ${failures.length}: ${preview}${more}`
+          `Requested ${requestedCount}/${requestableFilteredTransfers.length}. Failed ${failures.length}: ${preview}${more}`
         );
-      } else if (settledCount > 0) {
-        setToast({ tone: "success", message: `Settled ${settledCount} transfers` });
+      } else if (requestedCount > 0) {
+        setToast({ tone: "success", message: `Requested ${requestedCount} settlements` });
       }
     } catch (settleAllError) {
       setError(
-        toUserFriendlyError(settleAllError, "Could not settle all visible transfers.")
+        toUserFriendlyError(settleAllError, "Could not request all visible settlements.")
       );
     } finally {
       setIsSettlingAll(false);
@@ -1533,7 +1625,7 @@ export function TripDetailClient({ tripId }: Props) {
 
   async function undoLastSettlement() {
     if (!latestSettlement) {
-      setError("No settlements to undo");
+      setError("No approved settlements to undo");
       return;
     }
 
@@ -1544,7 +1636,7 @@ export function TripDetailClient({ tripId }: Props) {
       latestSettlement.currency
     )} at ${new Date(latestSettlement.paidAt).toLocaleString()}`;
 
-    if (!window.confirm(`Undo the most recent settlement?\n\n${preview}`)) {
+    if (!window.confirm(`Undo the most recent approved settlement?\n\n${preview}`)) {
       return;
     }
 
@@ -1845,19 +1937,21 @@ export function TripDetailClient({ tripId }: Props) {
               <button
                 type="button"
                 className="btn-secondary rounded-xl px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!filteredTransfers.length || isSettlingAll || Boolean(settlingTransferKey)}
+                disabled={!requestableFilteredTransfers.length || isSettlingAll || Boolean(settlingTransferKey)}
                 onClick={() => void settleAllVisibleTransfers()}
               >
-                {isSettlingAll ? "Settling all..." : `Settle all visible (${filteredTransfers.length})`}
+                {isSettlingAll
+                  ? "Requesting all..."
+                  : `Request all visible (${requestableFilteredTransfers.length})`}
               </button>
               {canUndoSettlements ? (
                 <button
                   type="button"
                   className="btn-secondary rounded-xl px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={!settlements.length || undoingSettlement || isActionLoading("undo-settlement")}
+                  disabled={!approvedSettlements.length || undoingSettlement || isActionLoading("undo-settlement")}
                   onClick={() => void undoLastSettlement()}
                 >
-                  {undoingSettlement ? "Undoing..." : "Undo last settlement"}
+                  {undoingSettlement ? "Undoing..." : "Undo last approved settlement"}
                 </button>
               ) : null}
               <a
@@ -1871,6 +1965,12 @@ export function TripDetailClient({ tripId }: Props) {
               <span className="text-xs text-muted">Timezone: {browserTimeZone}</span>
             </div>
           </div>
+
+          {filteredTransfers.length > requestableFilteredTransfers.length ? (
+            <p className="mb-3 text-xs text-muted">
+              Some visible transfers can only be requested by the paying member.
+            </p>
+          ) : null}
 
           <div className="mb-3 flex items-center gap-2 text-sm">
             <input
@@ -1902,6 +2002,83 @@ export function TripDetailClient({ tripId }: Props) {
               <p className="text-sm text-muted">No currency summary available yet.</p>
             )}
           </div>
+
+          {pendingIncomingSettlements.length || pendingOutgoingSettlements.length ? (
+            <div className="mb-4 grid gap-3 md:grid-cols-2">
+              <div className="rounded-lg border border-[var(--line)] bg-white px-3 py-3 text-sm">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                  Pending Your Approval
+                </p>
+                {pendingIncomingSettlements.length ? (
+                  <div className="mt-2 space-y-2">
+                    {pendingIncomingSettlements.map((settlement) => {
+                      const approveKey = `approve-settlement-${settlement.id}`;
+                      const rejectKey = `reject-settlement-${settlement.id}`;
+                      const isReviewing =
+                        isActionLoading(approveKey) || isActionLoading(rejectKey);
+
+                      return (
+                        <div key={`incoming-pending-${settlement.id}`} className="rounded-lg border border-[var(--line)] bg-[var(--background)] px-2 py-2">
+                          <p>
+                            <strong>{memberName.get(settlement.fromMemberId) ?? settlement.fromMemberId}</strong>{" "}
+                            requested {formatCurrency(settlement.amountCents, settlement.currency)}
+                          </p>
+                          <p className="text-xs text-muted">
+                            Claimed paid at {new Date(settlement.paidAt).toLocaleString()} • Requested at{" "}
+                            {new Date(settlement.createdAt).toLocaleString()}
+                          </p>
+                          <div className="mt-2 flex gap-2">
+                            <button
+                              type="button"
+                              className="btn-secondary rounded-lg px-2 py-1 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                              disabled={isReviewing}
+                              onClick={() => void reviewSettlementRequest(settlement.id, "approve")}
+                            >
+                              {isActionLoading(approveKey) ? "Approving..." : "Approve"}
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-lg border border-red-300 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+                              disabled={isReviewing}
+                              onClick={() => void reviewSettlementRequest(settlement.id, "reject")}
+                            >
+                              {isActionLoading(rejectKey) ? "Rejecting..." : "Reject"}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-muted">No pending requests for you.</p>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-[var(--line)] bg-white px-3 py-3 text-sm">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                  Your Pending Requests
+                </p>
+                {pendingOutgoingSettlements.length ? (
+                  <div className="mt-2 space-y-2">
+                    {pendingOutgoingSettlements.map((settlement) => (
+                      <div key={`outgoing-pending-${settlement.id}`} className="rounded-lg border border-[var(--line)] bg-[var(--background)] px-2 py-2">
+                        <p>
+                          Waiting for <strong>{memberName.get(settlement.toMemberId) ?? settlement.toMemberId}</strong>{" "}
+                          to approve {formatCurrency(settlement.amountCents, settlement.currency)}
+                        </p>
+                        <p className="text-xs text-muted">
+                          Claimed paid at {new Date(settlement.paidAt).toLocaleString()} • Requested at{" "}
+                          {new Date(settlement.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-muted">You have no pending settlement requests.</p>
+                )}
+              </div>
+            </div>
+          ) : null}
 
           <div className="mb-4 grid gap-2 md:grid-cols-2">
             <label className="text-xs text-muted">
@@ -1944,6 +2121,9 @@ export function TripDetailClient({ tripId }: Props) {
                   filteredTransfers.map((transfer, index) => {
                     const key = transferKey(transfer);
                     const quote = transferFxByKey.get(key);
+                    const canRequestTransfer =
+                      canRequestSettlementForAnyMember ||
+                      transfer.fromMemberId === tripData?.membership.id;
 
                     return (
                       <div
@@ -1959,10 +2139,14 @@ export function TripDetailClient({ tripId }: Props) {
                           <button
                             type="button"
                             className="btn-secondary rounded-lg px-2 py-1 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
-                            disabled={settlingTransferKey === key}
+                            disabled={settlingTransferKey === key || !canRequestTransfer}
                             onClick={() => void settleTransfer(transfer)}
                           >
-                            {settlingTransferKey === key ? "Settling..." : "Settle"}
+                            {settlingTransferKey === key
+                              ? "Requesting..."
+                              : canRequestTransfer
+                                ? "Request settle"
+                                : "Only payer can request"}
                           </button>
                         </div>
 
@@ -2171,11 +2355,16 @@ export function TripDetailClient({ tripId }: Props) {
               )}
           </div>
 
-          <form className="mt-5 grid gap-2 md:grid-cols-4" onSubmit={(event) => void addSettlement(event)}>
+          <div className="mt-5">
+            <p className="mb-2 text-xs text-muted">
+              Submitting a settlement creates a pending request. The receiving member must approve it.
+            </p>
+          <form className="grid gap-2 md:grid-cols-4" onSubmit={(event) => void addSettlement(event)}>
             <select
               className="rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm"
               value={settlementFrom}
               onChange={(event) => setSettlementFrom(event.target.value)}
+              disabled={!canRequestSettlementForAnyMember}
               required
             >
               <option value="">From member</option>
@@ -2222,10 +2411,11 @@ export function TripDetailClient({ tripId }: Props) {
                 className="btn-primary rounded-xl px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={isActionLoading("add-settlement")}
               >
-                {isActionLoading("add-settlement") ? "Adding..." : "Add"}
+                {isActionLoading("add-settlement") ? "Requesting..." : "Request"}
               </button>
             </div>
           </form>
+          </div>
 
           <div className="mt-6">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -2322,20 +2512,53 @@ export function TripDetailClient({ tripId }: Props) {
 
             <div className="space-y-2 text-sm">
               {paginatedSettlements.length ? (
-                paginatedSettlements.map((settlement) => (
-                  <div key={settlement.id} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
-                    <p>
-                      <strong>{memberName.get(settlement.fromMemberId) ?? settlement.fromMemberId}</strong> paid{" "}
-                      <strong>{memberName.get(settlement.toMemberId) ?? settlement.toMemberId}</strong>{" "}
-                      {formatCurrency(settlement.amountCents, settlement.currency)}
-                    </p>
-                    <p className="text-xs text-muted">
-                      Paid at {new Date(settlement.paidAt).toLocaleString()} • Recorded at{" "}
-                      {new Date(settlement.createdAt).toLocaleString()}
-                    </p>
-                    {settlement.notes ? <p className="text-xs text-muted">Notes: {settlement.notes}</p> : null}
-                  </div>
-                ))
+                paginatedSettlements.map((settlement) => {
+                  const fromLabel = memberName.get(settlement.fromMemberId) ?? settlement.fromMemberId;
+                  const toLabel = memberName.get(settlement.toMemberId) ?? settlement.toMemberId;
+                  const reviewerLabel = settlement.reviewedByMemberId
+                    ? memberName.get(settlement.reviewedByMemberId) ?? settlement.reviewedByMemberId
+                    : null;
+
+                  return (
+                    <div key={settlement.id} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p>
+                          <strong>{fromLabel}</strong>{" "}
+                          {settlement.status === "approved"
+                            ? "paid"
+                            : settlement.status === "rejected"
+                              ? "requested to pay"
+                              : "requested payment to"}{" "}
+                          <strong>{toLabel}</strong>{" "}
+                          {formatCurrency(settlement.amountCents, settlement.currency)}
+                        </p>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${
+                            settlement.status === "approved"
+                              ? "bg-emerald-100 text-emerald-800"
+                              : settlement.status === "rejected"
+                                ? "bg-red-100 text-red-800"
+                                : "bg-amber-100 text-amber-800"
+                          }`}
+                        >
+                          {settlement.status}
+                        </span>
+                      </div>
+                      <p className="text-xs text-muted">
+                        Claimed paid at {new Date(settlement.paidAt).toLocaleString()} • Requested at{" "}
+                        {new Date(settlement.createdAt).toLocaleString()}
+                      </p>
+                      {settlement.reviewedAt ? (
+                        <p className="text-xs text-muted">
+                          {settlement.status === "approved" ? "Approved" : "Rejected"}
+                          {reviewerLabel ? ` by ${reviewerLabel}` : ""} at{" "}
+                          {new Date(settlement.reviewedAt).toLocaleString()}
+                        </p>
+                      ) : null}
+                      {settlement.notes ? <p className="text-xs text-muted">Notes: {settlement.notes}</p> : null}
+                    </div>
+                  );
+                })
               ) : (
                 <p className="text-muted">No settlements match current filters.</p>
               )}

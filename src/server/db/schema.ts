@@ -19,6 +19,11 @@ export const splitModeEnum = pgEnum("split_mode", [
   "exact",
   "shares",
 ]);
+export const settlementStatusEnum = pgEnum("settlement_status", [
+  "pending",
+  "approved",
+  "rejected",
+]);
 
 export const users = pgTable(
   "users",
@@ -172,12 +177,21 @@ export const settlements = pgTable(
     amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
     paidAt: timestamp("paid_at", { withTimezone: true }).notNull(),
     notes: text("notes"),
+    status: settlementStatusEnum("status").default("approved").notNull(),
+    reviewedByMemberId: text("reviewed_by_member_id").references(() => tripMembers.id, {
+      onDelete: "set null",
+    }),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
     createdByMemberId: text("created_by_member_id")
       .references(() => tripMembers.id, { onDelete: "restrict" })
       .notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [index("settlements_trip_currency_idx").on(table.tripId, table.currency)]
+  (table) => [
+    index("settlements_trip_currency_idx").on(table.tripId, table.currency),
+    index("settlements_trip_status_idx").on(table.tripId, table.status),
+    index("settlements_to_member_status_idx").on(table.toMemberId, table.status),
+  ]
 );
 
 export const settlementRequestKeys = pgTable(

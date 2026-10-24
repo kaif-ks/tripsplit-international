@@ -73,6 +73,10 @@ export const createSettlementSchema = z.object({
   notes: z.string().max(1500).optional(),
 });
 
+export const settlementApprovalSchema = z.object({
+  action: z.enum(["approve", "reject"]),
+});
+
 export const tripSettingsSchema = z.object({
   defaultCurrency: z.enum(COMMON_CURRENCIES),
   simplifyTransfers: z.boolean(),

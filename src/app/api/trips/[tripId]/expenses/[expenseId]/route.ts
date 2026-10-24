@@ -131,7 +131,7 @@ export async function PATCH(request: NextRequest, context: Params) {
     const [existingSettlement] = await db
       .select({ id: settlements.id })
       .from(settlements)
-      .where(eq(settlements.tripId, tripId))
+      .where(and(eq(settlements.tripId, tripId), eq(settlements.status, "approved")))
       .limit(1);
 
     if (existingSettlement) {
@@ -258,7 +258,7 @@ export async function DELETE(request: NextRequest, context: Params) {
     const [existingSettlement] = await db
       .select({ id: settlements.id })
       .from(settlements)
-      .where(eq(settlements.tripId, tripId))
+      .where(and(eq(settlements.tripId, tripId), eq(settlements.status, "approved")))
       .limit(1);
 
     if (existingSettlement) {

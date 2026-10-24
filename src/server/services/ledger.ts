@@ -51,7 +51,10 @@ export async function computeTripBalances(tripId: string) {
     ? await db.select().from(expenseSplits).where(inArray(expenseSplits.expenseId, expenseIds))
     : [];
 
-  const tripSettlements = await db.select().from(settlements).where(eq(settlements.tripId, tripId));
+  const tripSettlements = await db
+    .select()
+    .from(settlements)
+    .where(and(eq(settlements.tripId, tripId), eq(settlements.status, "approved")));
 
   const balancesMap = new Map<string, number>();
   const expenseById = new Map(tripExpenses.map((expense) => [expense.id, expense]));

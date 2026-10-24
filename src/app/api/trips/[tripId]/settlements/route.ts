@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { NextRequest } from "next/server";
 import { requireUser } from "@/server/auth/require-user";
@@ -49,7 +49,11 @@ export async function GET(request: NextRequest, context: Params) {
     return forbidden();
   }
 
-  const rows = await db.select().from(settlements).where(eq(settlements.tripId, tripId));
+  const rows = await db
+    .select()
+    .from(settlements)
+    .where(eq(settlements.tripId, tripId))
+    .orderBy(desc(settlements.createdAt), desc(settlements.id));
 
   return ok({ settlements: rows });
 }
@@ -81,6 +85,26 @@ export async function POST(request: NextRequest, context: Params) {
 
   if (parsed.data.fromMemberId === parsed.data.toMemberId) {
     return badRequest("fromMemberId and toMemberId cannot be same");
+  }
+
+  const canRequestForAnyMember = membership.role === "owner" || membership.role === "admin";
+
+  if (!canRequestForAnyMember && parsed.data.fromMemberId !== membership.id) {
+    return forbidden("Only the paying member can request settlement approval");
+  }
+
+  const selectedMembers = await db
+    .select({ id: tripMembers.id })
+    .from(tripMembers)
+    .where(
+      and(
+        eq(tripMembers.tripId, tripId),
+        inArray(tripMembers.id, [parsed.data.fromMemberId, parsed.data.toMemberId])
+      )
+    );
+
+  if (selectedMembers.length !== 2) {
+    return badRequest("Selected member does not belong to this trip");
   }
 
   const idempotencyKey = readIdempotencyKey(request);
@@ -129,6 +153,9 @@ export async function POST(request: NextRequest, context: Params) {
           amountCents: parsed.data.amountCents,
           paidAt: new Date(parsed.data.paidAt),
           notes: parsed.data.notes ?? null,
+          status: "pending",
+          reviewedByMemberId: null,
+          reviewedAt: null,
           createdByMemberId: membership.id,
         });
       });
@@ -154,7 +181,7 @@ export async function POST(request: NextRequest, context: Params) {
       throw error;
     }
 
-    return created({ ok: true, idempotent: false, settlementId });
+    return created({ ok: true, idempotent: false, settlementId, status: "pending" });
   }
 
   await db.insert(settlements).values({
@@ -166,10 +193,13 @@ export async function POST(request: NextRequest, context: Params) {
     amountCents: parsed.data.amountCents,
     paidAt: new Date(parsed.data.paidAt),
     notes: parsed.data.notes ?? null,
+    status: "pending",
+    reviewedByMemberId: null,
+    reviewedAt: null,
     createdByMemberId: membership.id,
   });
 
-  return created({ ok: true, idempotent: false, settlementId });
+  return created({ ok: true, idempotent: false, settlementId, status: "pending" });
 }
 
 export async function DELETE(request: NextRequest, context: Params) {
@@ -197,12 +227,12 @@ export async function DELETE(request: NextRequest, context: Params) {
   const [latestSettlement] = await db
     .select({ id: settlements.id })
     .from(settlements)
-    .where(eq(settlements.tripId, tripId))
+    .where(and(eq(settlements.tripId, tripId), eq(settlements.status, "approved")))
     .orderBy(desc(settlements.paidAt), desc(settlements.createdAt), desc(settlements.id))
     .limit(1);
 
   if (!latestSettlement) {
-    return badRequest("No settlements to undo");
+    return badRequest("No approved settlements to undo");
   }
 
   await db.delete(settlements).where(eq(settlements.id, latestSettlement.id));
