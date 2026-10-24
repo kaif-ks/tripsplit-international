@@ -117,6 +117,50 @@ type CurrencySummary = {
   yourNetCents: number;
 };
 
+type CategoryCumulative = {
+  currency: string;
+  ranked: Array<{
+    category: ExpenseCategory;
+    spentCents: number;
+    refundCents: number;
+    netCents: number;
+  }>;
+  totalSpentCents: number;
+  topSpentCents: number;
+  totalNetCents: number;
+  topNetCents: number;
+  approximateConversionCount: number;
+  unconvertedExpenseCount: number;
+};
+
+type OweDetailModal = {
+  payerMemberId: string;
+  receiverMemberId: string;
+  displayCurrency: string;
+  totalAmountCents: number;
+  approximate: boolean;
+  unresolvedCount: number;
+  details: Array<{
+    sourceCurrency: string;
+    sourceAmountCents: number;
+    targetCurrency: string;
+    targetAmountCents: number | null;
+    approximate: boolean;
+    quotedAt: string | null;
+    rate: number | null;
+    conversionUnavailable: boolean;
+  }>;
+};
+
+type CategoryBreakdownModal = {
+  category: ExpenseCategory;
+  spentCents: number;
+  refundCents: number;
+  netCents: number;
+  currency: string;
+  sharePercent: number;
+};
+
 type EditablePayer = {
   memberId: string;
   amount: string;
@@ -269,6 +313,7 @@ export function TripDetailClient({ tripId }: Props) {
   const [transferFx, setTransferFx] = useState<TransferFxQuote[]>([]);
   const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [currencySummaries, setCurrencySummaries] = useState<CurrencySummary[]>([]);
+  const [categoryCumulative, setCategoryCumulative] = useState<CategoryCumulative | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
@@ -314,6 +359,8 @@ export function TripDetailClient({ tripId }: Props) {
   const [expenseCategoryFilter, setExpenseCategoryFilter] = useState<ExpenseCategory | "">("");
   const [expenseCurrencyFilter, setExpenseCurrencyFilter] = useState("");
   const [expenseSort, setExpenseSort] = useState<"newest" | "oldest" | "amountDesc" | "amountAsc">("newest");
+  const [oweDetailModal, setOweDetailModal] = useState<OweDetailModal | null>(null);
+  const [categoryBreakdownModal, setCategoryBreakdownModal] = useState<CategoryBreakdownModal | null>(null);
 
   const memberName = useMemo(() => {
     const map = new Map<string, string>();
@@ -543,70 +590,158 @@ export function TripDetailClient({ tripId }: Props) {
     expenseSearch.trim() || expenseCategoryFilter || expenseCurrencyFilter || expenseSort !== "newest"
   );
 
-  const categorySpendSummary = useMemo(() => {
-    const totals = new Map<string, { category: ExpenseCategory; currency: string; totalCents: number }>();
+  const groupedPersonSettlements = useMemo(() => {
+    type IncomingRow = {
+      currency: string;
+      amountCents: number;
+      approximate: boolean;
+      unresolvedCount: number;
+      transferCount: number;
+    };
 
-    for (const expense of expenses) {
-      const key = `${expense.category}:${expense.currency}`;
-      const existing = totals.get(key);
+    type OutgoingRow = {
+      toMemberId: string;
+      currency: string;
+      amountCents: number;
+      approximate: boolean;
+      unresolvedCount: number;
+      transferCount: number;
+      details: OweDetailModal["details"];
+    };
 
-      if (existing) {
-        existing.totalCents += expense.amountCents;
+    const preferredByMemberId = new Map(
+      members.map((member) => [member.id, member.preferredSettlementCurrency])
+    );
+
+    const incomingByMember = new Map<string, Map<string, IncomingRow>>();
+    const outgoingByMember = new Map<string, Map<string, OutgoingRow>>();
+
+    for (const transfer of transfers) {
+      const key = transferKey(transfer);
+      const quote = transferFxByKey.get(key);
+      const receiverPreferredCurrency = preferredByMemberId.get(transfer.toMemberId);
+      const preferredCurrency = receiverPreferredCurrency || transfer.currency;
+
+      let displayAmountCents: number | null = transfer.amountCents;
+      let approximate = false;
+      let conversionUnavailable = false;
+
+      if (receiverPreferredCurrency && receiverPreferredCurrency !== transfer.currency) {
+        if (quote) {
+          displayAmountCents = quote.targetAmountCents;
+          approximate = quote.source !== "identity";
+        } else {
+          displayAmountCents = null;
+          conversionUnavailable = true;
+        }
+      }
+
+      if (!incomingByMember.has(transfer.toMemberId)) {
+        incomingByMember.set(transfer.toMemberId, new Map());
+      }
+
+      const incomingKey = preferredCurrency;
+      const incomingRows = incomingByMember.get(transfer.toMemberId)!;
+      const existingIncoming = incomingRows.get(incomingKey);
+
+      if (existingIncoming) {
+        existingIncoming.transferCount += 1;
+        existingIncoming.approximate = existingIncoming.approximate || approximate;
+
+        if (displayAmountCents !== null) {
+          existingIncoming.amountCents += displayAmountCents;
+        }
+
+        if (conversionUnavailable) {
+          existingIncoming.unresolvedCount += 1;
+        }
       } else {
-        totals.set(key, {
-          category: expense.category,
-          currency: expense.currency,
-          totalCents: expense.amountCents,
+        incomingRows.set(incomingKey, {
+          currency: preferredCurrency,
+          amountCents: displayAmountCents ?? 0,
+          approximate,
+          unresolvedCount: conversionUnavailable ? 1 : 0,
+          transferCount: 1,
+        });
+      }
+
+      if (!outgoingByMember.has(transfer.fromMemberId)) {
+        outgoingByMember.set(transfer.fromMemberId, new Map());
+      }
+
+      const outgoingRows = outgoingByMember.get(transfer.fromMemberId)!;
+      const outgoingKey = `${transfer.toMemberId}:${preferredCurrency}`;
+      const existingOutgoing = outgoingRows.get(outgoingKey);
+
+      const detailRow: OweDetailModal["details"][number] = {
+        sourceCurrency: transfer.currency,
+        sourceAmountCents: transfer.amountCents,
+        targetCurrency: preferredCurrency,
+        targetAmountCents: displayAmountCents,
+        approximate,
+        quotedAt: quote?.quotedAt ?? null,
+        rate: quote?.rate ?? null,
+        conversionUnavailable,
+      };
+
+      if (existingOutgoing) {
+        existingOutgoing.transferCount += 1;
+        existingOutgoing.approximate = existingOutgoing.approximate || approximate;
+
+        if (displayAmountCents !== null) {
+          existingOutgoing.amountCents += displayAmountCents;
+        }
+
+        if (conversionUnavailable) {
+          existingOutgoing.unresolvedCount += 1;
+        }
+
+        existingOutgoing.details.push(detailRow);
+      } else {
+        outgoingRows.set(outgoingKey, {
+          toMemberId: transfer.toMemberId,
+          currency: preferredCurrency,
+          amountCents: displayAmountCents ?? 0,
+          approximate,
+          unresolvedCount: conversionUnavailable ? 1 : 0,
+          transferCount: 1,
+          details: [detailRow],
         });
       }
     }
 
-    return [...totals.values()].sort((a, b) => b.totalCents - a.totalCents);
-  }, [expenses]);
+    return members
+      .map((member) => {
+        const incomingRows = [...(incomingByMember.get(member.id)?.values() ?? [])].sort(
+          (left, right) => right.amountCents - left.amountCents
+        );
+        const outgoingRows = [...(outgoingByMember.get(member.id)?.values() ?? [])].sort(
+          (left, right) => right.amountCents - left.amountCents
+        );
 
-  const topCategoryInDefaultCurrency = useMemo(() => {
-    const defaultCurrency = tripData?.trip.defaultCurrency ?? "USD";
-    return categorySpendSummary.find((row) => row.currency === defaultCurrency) ?? null;
-  }, [categorySpendSummary, tripData]);
+        return {
+          memberId: member.id,
+          incomingRows,
+          outgoingRows,
+        };
+      })
+      .filter((entry) => entry.incomingRows.length || entry.outgoingRows.length);
+  }, [members, transferFxByKey, transfers]);
 
-  const defaultCurrencyCategoryAnalytics = useMemo(() => {
-    const defaultCurrency = tripData?.trip.defaultCurrency ?? "USD";
-    const rows = new Map<ExpenseCategory, { spentCents: number; refundCents: number }>();
-
-    for (const expense of expenses) {
-      if (expense.currency !== defaultCurrency) {
-        continue;
-      }
-
-      const current = rows.get(expense.category) ?? { spentCents: 0, refundCents: 0 };
-
-      if (expense.amountCents >= 0) {
-        current.spentCents += expense.amountCents;
-      } else {
-        current.refundCents += Math.abs(expense.amountCents);
-      }
-
-      rows.set(expense.category, current);
-    }
-
-    const ranked = [...rows.entries()]
-      .map(([category, values]) => ({
-        category,
-        spentCents: values.spentCents,
-        refundCents: values.refundCents,
-      }))
-      .sort((a, b) => b.spentCents - a.spentCents);
-
-    const totalSpentCents = ranked.reduce((sum, row) => sum + row.spentCents, 0);
-    const topSpentCents = ranked[0]?.spentCents ?? 0;
-
-    return {
-      currency: defaultCurrency,
-      ranked,
-      totalSpentCents,
-      topSpentCents,
-    };
-  }, [expenses, tripData]);
+  const categoryAnalytics = useMemo(
+    () =>
+      categoryCumulative ?? {
+        currency: tripData?.trip.defaultCurrency ?? "USD",
+        ranked: [] as CategoryCumulative["ranked"],
+        totalSpentCents: 0,
+        topSpentCents: 0,
+        totalNetCents: 0,
+        topNetCents: 0,
+        approximateConversionCount: 0,
+        unconvertedExpenseCount: 0,
+      },
+    [categoryCumulative, tripData?.trip.defaultCurrency]
+  );
 
   const isActionLoading = useCallback(
     (key: string) => Boolean(actionLoading[key]),
@@ -653,7 +788,9 @@ export function TripDetailClient({ tripId }: Props) {
           `/api/trips/${tripId}/balances`
         ),
           api<{ settlements: Settlement[] }>(`/api/trips/${tripId}/settlements`),
-          api<{ summaries: CurrencySummary[] }>(`/api/trips/${tripId}/summary`),
+          api<{ summaries: CurrencySummary[]; categoryCumulative: CategoryCumulative }>(
+            `/api/trips/${tripId}/summary`
+          ),
         ]);
 
       setTripData(trip);
@@ -687,6 +824,7 @@ export function TripDetailClient({ tripId }: Props) {
       setTransferFx(balanceResponse.transferFx ?? []);
       setSettlements(settlementsResponse.settlements);
       setCurrencySummaries(summaryResponse.summaries);
+      setCategoryCumulative(summaryResponse.categoryCumulative);
       setSimplifyTransfers(trip.trip.simplifyTransfers);
       setLockAfterSettlement(trip.trip.lockAfterSettlement);
     } catch (loadError) {
@@ -970,6 +1108,14 @@ export function TripDetailClient({ tripId }: Props) {
   function closeExpenseDetails() {
     setViewingExpenseId(null);
     setViewingExpenseDetail(null);
+  }
+
+  function closeOweDetailModal() {
+    setOweDetailModal(null);
+  }
+
+  function closeCategoryBreakdownModal() {
+    setCategoryBreakdownModal(null);
   }
 
   async function openExpenseDetails(expenseId: string) {
@@ -1838,136 +1984,191 @@ export function TripDetailClient({ tripId }: Props) {
 
             <div>
               <h3 className="mb-2 text-lg">Grouped by person</h3>
+              <p className="mb-2 text-xs text-muted">
+                Always full trip view. This section does not change with From/To filters.
+              </p>
               <div className="space-y-2 text-sm">
-                {members.map((member) => {
-                  const rows = balances.filter((balance) => balance.memberId === member.id);
+                {groupedPersonSettlements.length ? (
+                  groupedPersonSettlements.map((entry) => {
+                    const member = members.find((candidate) => candidate.id === entry.memberId);
 
-                  if (!rows.length) {
-                    return null;
-                  }
-
-                  return (
-                    <div key={member.id} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
-                      <p className="font-semibold">{member.displayName || member.email}</p>
-                      {rows.map((row) => (
-                        <p key={`${row.memberId}-${row.currency}`} className="text-muted">
-                          {row.balanceCents > 0 ? "Gets" : "Owes"} {formatCurrency(Math.abs(row.balanceCents), row.currency)}
+                    return (
+                      <div key={entry.memberId} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
+                        <p className="font-semibold">{member?.displayName || member?.email || entry.memberId}</p>
+                        <p className="text-xs text-muted">
+                          Expected receive currency: {member?.preferredSettlementCurrency ?? "Original transfer currency"}
                         </p>
-                      ))}
-                    </div>
-                  );
-                })}
+
+                        <div className="mt-2 grid gap-2 md:grid-cols-2">
+                          <div>
+                            <p className="text-xs font-semibold uppercase tracking-wide text-muted">Expected to receive</p>
+                            {entry.incomingRows.length ? (
+                              <div className="mt-1 space-y-1">
+                                {entry.incomingRows.map((row) => (
+                                  <p key={`${entry.memberId}-incoming-${row.currency}`} className="text-muted">
+                                    {row.approximate ? "~" : ""}
+                                    {formatCurrency(row.amountCents, row.currency)}
+                                    {row.transferCount > 1 ? ` (${row.transferCount} transfers)` : ""}
+                                    {row.unresolvedCount > 0
+                                      ? ` • ${row.unresolvedCount} transfer${
+                                          row.unresolvedCount === 1 ? "" : "s"
+                                        } pending FX`
+                                      : ""}
+                                  </p>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="mt-1 text-muted">No incoming settlements</p>
+                            )}
+                          </div>
+
+                          <div>
+                            <p className="text-xs font-semibold uppercase tracking-wide text-muted">Needs to pay</p>
+                            {entry.outgoingRows.length ? (
+                              <div className="mt-1 space-y-1">
+                                {entry.outgoingRows.map((row) => (
+                                  <button
+                                    key={`${entry.memberId}-outgoing-${row.toMemberId}-${row.currency}`}
+                                    type="button"
+                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--background)] px-2 py-2 text-left"
+                                    onClick={() =>
+                                      setOweDetailModal({
+                                        payerMemberId: entry.memberId,
+                                        receiverMemberId: row.toMemberId,
+                                        displayCurrency: row.currency,
+                                        totalAmountCents: row.amountCents,
+                                        approximate: row.approximate,
+                                        unresolvedCount: row.unresolvedCount,
+                                        details: row.details,
+                                      })
+                                    }
+                                  >
+                                    <p className="text-muted">
+                                      To <strong>{memberName.get(row.toMemberId) ?? row.toMemberId}</strong>: {row.approximate ? "~" : ""}
+                                      {formatCurrency(row.amountCents, row.currency)}
+                                    </p>
+                                    <p className="text-xs text-muted">
+                                      {row.transferCount} transfer{row.transferCount === 1 ? "" : "s"} • Tap for breakdown
+                                      {row.unresolvedCount > 0
+                                        ? ` • ${row.unresolvedCount} pending FX conversion`
+                                        : ""}
+                                    </p>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="mt-1 text-muted">No outgoing settlements</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="text-muted">No pending transfers for this filter</p>
+                )}
               </div>
             </div>
           </div>
 
           <div className="mt-5">
             <h3 className="mb-2 text-lg">Spend by Category</h3>
-            {topCategoryInDefaultCurrency ? (
-              <p className="mb-2 text-sm text-muted">
-                Highest in {tripData?.trip.defaultCurrency ?? "USD"}: {formatCategoryLabel(topCategoryInDefaultCurrency.category)} (
-                {formatCurrency(topCategoryInDefaultCurrency.totalCents, topCategoryInDefaultCurrency.currency)})
-              </p>
-            ) : null}
+            <p className="mb-2 text-sm text-muted">
+              Cumulative category totals in {categoryAnalytics.currency}, ranked by net spend.
+              {categoryAnalytics.approximateConversionCount
+                ? ` Includes approximate FX conversion for ${categoryAnalytics.approximateConversionCount} expense${
+                    categoryAnalytics.approximateConversionCount === 1 ? "" : "s"
+                  }.`
+                : " No FX conversion needed for current totals."}
+              {categoryAnalytics.unconvertedExpenseCount
+                ? ` ${categoryAnalytics.unconvertedExpenseCount} expense${
+                    categoryAnalytics.unconvertedExpenseCount === 1 ? "" : "s"
+                  } could not be converted and were excluded.`
+                : ""}
+            </p>
             <div className="grid gap-3 md:grid-cols-3">
               <div className="rounded-lg border border-[var(--line)] bg-white px-3 py-3 text-sm">
                 <p className="text-xs uppercase tracking-wide text-muted">Category Leader</p>
-                {defaultCurrencyCategoryAnalytics.ranked.length ? (
+                {categoryAnalytics.ranked.length ? (
                   <>
                     <p className="mt-1 font-semibold">
-                      {formatCategoryLabel(defaultCurrencyCategoryAnalytics.ranked[0].category)}
+                      {formatCategoryLabel(categoryAnalytics.ranked[0].category)}
                     </p>
                     <p className="text-muted">
-                      {formatCurrency(
-                        defaultCurrencyCategoryAnalytics.ranked[0].spentCents,
-                        defaultCurrencyCategoryAnalytics.currency
-                      )}
+                      Net: {formatCurrency(categoryAnalytics.ranked[0].netCents, categoryAnalytics.currency)}
                     </p>
                   </>
                 ) : (
-                  <p className="mt-1 text-muted">No spend data in {defaultCurrencyCategoryAnalytics.currency}.</p>
+                  <p className="mt-1 text-muted">No spend data in {categoryAnalytics.currency}.</p>
                 )}
               </div>
               <div className="rounded-lg border border-[var(--line)] bg-white px-3 py-3 text-sm">
                 <p className="text-xs uppercase tracking-wide text-muted">Tracked Categories</p>
-                <p className="mt-1 text-lg font-semibold">{defaultCurrencyCategoryAnalytics.ranked.length}</p>
-                <p className="text-xs text-muted">In {defaultCurrencyCategoryAnalytics.currency}</p>
+                <p className="mt-1 text-lg font-semibold">{categoryAnalytics.ranked.length}</p>
+                <p className="text-xs text-muted">In {categoryAnalytics.currency}</p>
               </div>
               <div className="rounded-lg border border-[var(--line)] bg-white px-3 py-3 text-sm">
-                <p className="text-xs uppercase tracking-wide text-muted">Total Categorized Spend</p>
+                <p className="text-xs uppercase tracking-wide text-muted">Total Net Spend</p>
                 <p className="mt-1 text-lg font-semibold">
                   {formatCurrency(
-                    defaultCurrencyCategoryAnalytics.totalSpentCents,
-                    defaultCurrencyCategoryAnalytics.currency
+                    categoryAnalytics.totalNetCents,
+                    categoryAnalytics.currency
                   )}
                 </p>
               </div>
             </div>
 
-            {defaultCurrencyCategoryAnalytics.ranked.length ? (
+            {categoryAnalytics.ranked.length ? (
               <div className="mt-3 overflow-hidden rounded-lg border border-[var(--line)] bg-white">
                 <div className="grid grid-cols-[56px_1fr_auto_auto] gap-2 border-b border-[var(--line)] bg-[var(--background)] px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted">
                   <p>Rank</p>
                   <p>Category</p>
-                  <p>Share</p>
-                  <p className="text-right">Spent</p>
+                  <p className="text-right">Net</p>
+                  <p className="text-right">Breakdown</p>
                 </div>
                 <div className="divide-y divide-[var(--line)]">
-                  {defaultCurrencyCategoryAnalytics.ranked.map((row, index) => {
-                    const percentOfTotal =
-                      defaultCurrencyCategoryAnalytics.totalSpentCents > 0
-                        ? (row.spentCents / defaultCurrencyCategoryAnalytics.totalSpentCents) * 100
-                        : 0;
-                    const barWidth =
-                      defaultCurrencyCategoryAnalytics.topSpentCents > 0
-                        ? (row.spentCents / defaultCurrencyCategoryAnalytics.topSpentCents) * 100
-                        : 0;
-
+                  {categoryAnalytics.ranked.map((row, index) => {
                     return (
                       <div key={`leaderboard-${row.category}-${index}`} className="grid grid-cols-[56px_1fr_auto_auto] items-center gap-2 px-3 py-2 text-sm">
                         <p className="font-semibold text-muted">#{index + 1}</p>
                         <div>
                           <p className="font-medium">{formatCategoryLabel(row.category)}</p>
-                          <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-[var(--background)]">
-                            <div
-                              className="h-full rounded-full bg-[var(--primary)]"
-                              style={{ width: `${Math.max(3, Math.round(barWidth))}%` }}
-                            />
-                          </div>
-                          {row.refundCents > 0 ? (
-                            <p className="mt-1 text-xs text-muted">
-                              Refunds: {formatCurrency(row.refundCents, defaultCurrencyCategoryAnalytics.currency)}
-                            </p>
-                          ) : null}
+                          <p className="text-xs text-muted">
+                            Spent {formatCurrency(row.spentCents, categoryAnalytics.currency)} • Refunds {formatCurrency(row.refundCents, categoryAnalytics.currency)}
+                          </p>
                         </div>
-                        <p className="text-xs text-muted">{percentOfTotal.toFixed(1)}%</p>
                         <p className="text-right font-semibold">
-                          {formatCurrency(row.spentCents, defaultCurrencyCategoryAnalytics.currency)}
+                          {formatCurrency(row.netCents, categoryAnalytics.currency)}
                         </p>
+                        <div className="text-right">
+                          <button
+                            type="button"
+                            className="btn-secondary rounded-lg px-2 py-1 text-xs font-semibold"
+                            onClick={() =>
+                              setCategoryBreakdownModal({
+                                category: row.category,
+                                spentCents: row.spentCents,
+                                refundCents: row.refundCents,
+                                netCents: row.netCents,
+                                currency: categoryAnalytics.currency,
+                                sharePercent:
+                                  categoryAnalytics.totalNetCents !== 0
+                                    ? (row.netCents / categoryAnalytics.totalNetCents) * 100
+                                    : 0,
+                              })
+                            }
+                          >
+                            View
+                          </button>
+                        </div>
                       </div>
                     );
                   })}
                 </div>
               </div>
-            ) : null}
-
-            <div className="mt-3 grid gap-2 md:grid-cols-2">
-              {categorySpendSummary.length ? (
-                categorySpendSummary.map((row) => (
-                  <div
-                    key={`${row.category}-${row.currency}`}
-                    className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-sm"
-                  >
-                    <p className="font-semibold capitalize">
-                      {formatCategoryLabel(row.category)} <span className="text-xs font-normal text-muted">({row.currency})</span>
-                    </p>
-                    <p className="text-muted">{formatCurrency(row.totalCents, row.currency)}</p>
-                  </div>
-                ))
               ) : (
                 <p className="text-sm text-muted">No category data yet.</p>
               )}
-            </div>
           </div>
 
           <form className="mt-5 grid gap-2 md:grid-cols-4" onSubmit={(event) => void addSettlement(event)}>
@@ -2400,6 +2601,108 @@ export function TripDetailClient({ tripId }: Props) {
           >
             Add expense
           </button>
+        </div>
+      ) : null}
+
+      {oweDetailModal ? (
+        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-4 md:py-10">
+          <div className="card max-h-[90vh] w-full max-w-2xl overflow-y-auto p-5">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h2 className="text-2xl">Payment Breakdown</h2>
+              <button
+                type="button"
+                className="btn-secondary rounded-xl px-3 py-2 text-xs font-semibold"
+                onClick={closeOweDetailModal}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-[var(--line)] bg-white p-3 text-sm">
+              <p>
+                <strong>{memberName.get(oweDetailModal.payerMemberId) ?? oweDetailModal.payerMemberId}</strong> pays{" "}
+                <strong>{memberName.get(oweDetailModal.receiverMemberId) ?? oweDetailModal.receiverMemberId}</strong>
+              </p>
+              <p className="mt-1 font-semibold">
+                {oweDetailModal.approximate ? "~" : ""}
+                {formatCurrency(oweDetailModal.totalAmountCents, oweDetailModal.displayCurrency)}
+              </p>
+              {oweDetailModal.unresolvedCount > 0 ? (
+                <p className="mt-1 text-xs text-muted">
+                  {oweDetailModal.unresolvedCount} transfer{oweDetailModal.unresolvedCount === 1 ? "" : "s"} could not be converted to receiver preferred currency.
+                </p>
+              ) : null}
+            </div>
+
+            <div className="mt-3 space-y-2 text-sm">
+              {oweDetailModal.details.map((detail, index) => (
+                <div key={`owe-detail-${index}`} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
+                  <p>
+                    Source: {formatCurrency(detail.sourceAmountCents, detail.sourceCurrency)}
+                  </p>
+                  {detail.conversionUnavailable ? (
+                    <p className="text-xs text-muted">
+                      Conversion unavailable to {detail.targetCurrency} for this transfer.
+                    </p>
+                  ) : (
+                    <>
+                      <p>
+                        Target: {detail.approximate ? "~" : ""}
+                        {formatCurrency(detail.targetAmountCents ?? 0, detail.targetCurrency)}
+                      </p>
+                      {detail.rate ? (
+                        <p className="text-xs text-muted">
+                          Rate: 1 {detail.sourceCurrency} = {formatFxRate(detail.rate)} {detail.targetCurrency}
+                          {detail.quotedAt ? ` • ${new Date(detail.quotedAt).toLocaleString()}` : ""}
+                        </p>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {categoryBreakdownModal ? (
+        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/40 px-4 py-4 md:py-10">
+          <div className="card max-h-[90vh] w-full max-w-lg overflow-y-auto p-5">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h2 className="text-2xl">Category Breakdown</h2>
+              <button
+                type="button"
+                className="btn-secondary rounded-xl px-3 py-2 text-xs font-semibold"
+                onClick={closeCategoryBreakdownModal}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="rounded-xl border border-[var(--line)] bg-white p-3 text-sm">
+              <p className="font-semibold">{formatCategoryLabel(categoryBreakdownModal.category)}</p>
+              <p className="text-xs text-muted">Currency: {categoryBreakdownModal.currency}</p>
+            </div>
+
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              <div className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-sm">
+                <p className="text-xs uppercase tracking-wide text-muted">Net Spend</p>
+                <p className="font-semibold">{formatCurrency(categoryBreakdownModal.netCents, categoryBreakdownModal.currency)}</p>
+              </div>
+              <div className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-sm">
+                <p className="text-xs uppercase tracking-wide text-muted">Share of Net</p>
+                <p className="font-semibold">{Number.isFinite(categoryBreakdownModal.sharePercent) ? `${categoryBreakdownModal.sharePercent.toFixed(1)}%` : "0.0%"}</p>
+              </div>
+              <div className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-sm">
+                <p className="text-xs uppercase tracking-wide text-muted">Gross Spend</p>
+                <p className="font-semibold">{formatCurrency(categoryBreakdownModal.spentCents, categoryBreakdownModal.currency)}</p>
+              </div>
+              <div className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-sm">
+                <p className="text-xs uppercase tracking-wide text-muted">Refunds</p>
+                <p className="font-semibold">{formatCurrency(categoryBreakdownModal.refundCents, categoryBreakdownModal.currency)}</p>
+              </div>
+            </div>
+          </div>
         </div>
       ) : null}
 

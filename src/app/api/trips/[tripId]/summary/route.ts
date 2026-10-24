@@ -2,7 +2,8 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { NextRequest } from "next/server";
 import { requireUser } from "@/server/auth/require-user";
 import { db } from "@/server/db";
-import { expensePayers, expenses, tripMembers } from "@/server/db/schema";
+import { expensePayers, expenses, tripMembers, trips } from "@/server/db/schema";
+import { getFxQuote } from "@/server/fx/rates";
 import { forbidden, ok, unauthorized } from "@/server/http";
 import { computeTripBalances } from "@/server/services/ledger";
 
@@ -15,6 +16,13 @@ type CurrencySummary = {
   totalExpenseCents: number;
   youPaidCents: number;
   yourNetCents: number;
+};
+
+type CategorySummary = {
+  category: string;
+  spentCents: number;
+  refundCents: number;
+  netCents: number;
 };
 
 export async function GET(request: NextRequest, context: Params) {
@@ -38,11 +46,20 @@ export async function GET(request: NextRequest, context: Params) {
   const tripExpenses = await db
     .select({
       id: expenses.id,
+      category: expenses.category,
       currency: expenses.currency,
       amountCents: expenses.amountCents,
     })
     .from(expenses)
     .where(and(eq(expenses.tripId, tripId), isNull(expenses.deletedAt)));
+
+  const [trip] = await db
+    .select({ defaultCurrency: trips.defaultCurrency })
+    .from(trips)
+    .where(eq(trips.id, tripId))
+    .limit(1);
+
+  const defaultCurrency = trip?.defaultCurrency ?? "USD";
 
   const expenseIds = tripExpenses.map((expense) => expense.id);
   const payers = expenseIds.length
@@ -107,5 +124,83 @@ export async function GET(request: NextRequest, context: Params) {
       yourNetCents: netByCurrency.get(currency) ?? 0,
     }));
 
-  return ok({ summaries });
+  const conversionPairs = new Set<string>();
+
+  for (const expense of tripExpenses) {
+    if (expense.currency === defaultCurrency) {
+      continue;
+    }
+
+    conversionPairs.add(`${expense.currency}:${defaultCurrency}`);
+  }
+
+  const quotesByPair = new Map<string, Awaited<ReturnType<typeof getFxQuote>>>();
+
+  await Promise.all(
+    [...conversionPairs].map(async (pair) => {
+      const [fromCurrency, toCurrency] = pair.split(":");
+      const quote = await getFxQuote(fromCurrency, toCurrency);
+      quotesByPair.set(pair, quote);
+    })
+  );
+
+  const categoryTotals = new Map<string, { spentCents: number; refundCents: number }>();
+  let approximateConversionCount = 0;
+  let unconvertedExpenseCount = 0;
+
+  for (const expense of tripExpenses) {
+    const pair = `${expense.currency}:${defaultCurrency}`;
+    const quote = expense.currency === defaultCurrency ? null : quotesByPair.get(pair);
+
+    if (expense.currency !== defaultCurrency && !quote) {
+      unconvertedExpenseCount += 1;
+      continue;
+    }
+
+    const convertedAmountCents = quote
+      ? Math.round(expense.amountCents * quote.rate)
+      : expense.amountCents;
+
+    if (quote) {
+      approximateConversionCount += 1;
+    }
+
+    const current = categoryTotals.get(expense.category) ?? { spentCents: 0, refundCents: 0 };
+
+    if (convertedAmountCents >= 0) {
+      current.spentCents += convertedAmountCents;
+    } else {
+      current.refundCents += Math.abs(convertedAmountCents);
+    }
+
+    categoryTotals.set(expense.category, current);
+  }
+
+  const rankedCategories: CategorySummary[] = [...categoryTotals.entries()]
+    .map(([category, totals]) => ({
+      category,
+      spentCents: totals.spentCents,
+      refundCents: totals.refundCents,
+      netCents: totals.spentCents - totals.refundCents,
+    }))
+    .sort((left, right) => right.netCents - left.netCents);
+
+  const totalSpentCents = rankedCategories.reduce((sum, row) => sum + row.spentCents, 0);
+  const topSpentCents = rankedCategories[0]?.spentCents ?? 0;
+  const totalNetCents = rankedCategories.reduce((sum, row) => sum + row.netCents, 0);
+  const topNetCents = rankedCategories[0]?.netCents ?? 0;
+
+  return ok({
+    summaries,
+    categoryCumulative: {
+      currency: defaultCurrency,
+      ranked: rankedCategories,
+      totalSpentCents,
+      topSpentCents,
+        totalNetCents,
+        topNetCents,
+      approximateConversionCount,
+      unconvertedExpenseCount,
+    },
+  });
 }
