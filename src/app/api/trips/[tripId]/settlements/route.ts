@@ -107,6 +107,31 @@ export async function POST(request: NextRequest, context: Params) {
     return badRequest("Selected member does not belong to this trip");
   }
 
+  const [existingPendingSettlement] = await db
+    .select({ id: settlements.id })
+    .from(settlements)
+    .where(
+      and(
+        eq(settlements.tripId, tripId),
+        eq(settlements.status, "pending"),
+        eq(settlements.fromMemberId, parsed.data.fromMemberId),
+        eq(settlements.toMemberId, parsed.data.toMemberId),
+        eq(settlements.currency, parsed.data.currency),
+        eq(settlements.amountCents, parsed.data.amountCents)
+      )
+    )
+    .limit(1);
+
+  if (existingPendingSettlement) {
+    return ok({
+      ok: true,
+      idempotent: true,
+      settlementId: existingPendingSettlement.id,
+      status: "pending",
+      duplicatePending: true,
+    });
+  }
+
   const idempotencyKey = readIdempotencyKey(request);
 
   if (idempotencyKey && idempotencyKey.length > 120) {

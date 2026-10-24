@@ -565,18 +565,45 @@ export function TripDetailClient({ tripId }: Props) {
     [transferFromFilter, transferToFilter, transfers]
   );
 
+  const pendingTransferRequestKeys = useMemo(() => {
+    const keys = new Set<string>();
+
+    for (const settlement of settlements) {
+      if (settlement.status !== "pending") {
+        continue;
+      }
+
+      keys.add(
+        transferKey({
+          fromMemberId: settlement.fromMemberId,
+          toMemberId: settlement.toMemberId,
+          currency: settlement.currency,
+          amountCents: settlement.amountCents,
+        })
+      );
+    }
+
+    return keys;
+  }, [settlements]);
+
   const requestableFilteredTransfers = useMemo(
     () =>
       filteredTransfers.filter((transfer) => {
+        const key = transferKey(transfer);
         const isCurrentMemberReceiver = transfer.toMemberId === tripData?.membership.id;
 
-        if (isCurrentMemberReceiver) {
+        if (isCurrentMemberReceiver || pendingTransferRequestKeys.has(key)) {
           return false;
         }
 
         return canRequestSettlementForAnyMember || transfer.fromMemberId === tripData?.membership.id;
       }),
-    [canRequestSettlementForAnyMember, filteredTransfers, tripData?.membership.id]
+    [
+      canRequestSettlementForAnyMember,
+      filteredTransfers,
+      pendingTransferRequestKeys,
+      tripData?.membership.id,
+    ]
   );
 
   const expenseCurrencies = useMemo(
@@ -780,8 +807,7 @@ export function TripDetailClient({ tripId }: Props) {
           incomingRows,
           outgoingRows,
         };
-      })
-      .filter((entry) => entry.incomingRows.length || entry.outgoingRows.length);
+      });
   }, [members, transferFxByKey, transfers]);
 
   const categoryAnalytics = useMemo(
@@ -1517,6 +1543,11 @@ export function TripDetailClient({ tripId }: Props) {
   async function settleTransfer(transfer: Transfer) {
     const key = transferKey(transfer);
 
+    if (pendingTransferRequestKeys.has(key)) {
+      setError("Settlement request already pending for this transfer.");
+      return;
+    }
+
     if (
       transfer.toMemberId === tripData?.membership.id &&
       transfer.fromMemberId !== tripData?.membership.id
@@ -2135,8 +2166,10 @@ export function TripDetailClient({ tripId }: Props) {
                     const key = transferKey(transfer);
                     const quote = transferFxByKey.get(key);
                     const isCurrentMemberReceiver = transfer.toMemberId === tripData?.membership.id;
+                    const isAlreadyRequested = pendingTransferRequestKeys.has(key);
                     const canRequestTransfer =
                       !isCurrentMemberReceiver &&
+                      !isAlreadyRequested &&
                       (canRequestSettlementForAnyMember ||
                         transfer.fromMemberId === tripData?.membership.id);
 
@@ -2159,6 +2192,8 @@ export function TripDetailClient({ tripId }: Props) {
                           >
                             {settlingTransferKey === key
                               ? "Requesting..."
+                              : isAlreadyRequested
+                                ? "Requested"
                               : isCurrentMemberReceiver
                                 ? "Waiting for payer"
                                 : canRequestTransfer
@@ -2192,10 +2227,19 @@ export function TripDetailClient({ tripId }: Props) {
                 {groupedPersonSettlements.length ? (
                   groupedPersonSettlements.map((entry) => {
                     const member = members.find((candidate) => candidate.id === entry.memberId);
+                    const isFullySettled =
+                      entry.incomingRows.length === 0 && entry.outgoingRows.length === 0;
 
                     return (
                       <div key={entry.memberId} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
-                        <p className="font-semibold">{member?.displayName || member?.email || entry.memberId}</p>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="font-semibold">{member?.displayName || member?.email || entry.memberId}</p>
+                          {isFullySettled ? (
+                            <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                              All settled 🎉
+                            </span>
+                          ) : null}
+                        </div>
                         <p className="text-xs text-muted">
                           Expected receive currency: {member?.preferredSettlementCurrency ?? "Original transfer currency"}
                         </p>
@@ -2219,7 +2263,11 @@ export function TripDetailClient({ tripId }: Props) {
                                 ))}
                               </div>
                             ) : (
-                              <p className="mt-1 text-muted">No incoming settlements</p>
+                              <p className="mt-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-emerald-700">
+                                {isFullySettled
+                                  ? "No incoming or outgoing dues. You are fully settled ✨"
+                                  : "No incoming settlements pending. Nice and clear ✅"}
+                              </p>
                             )}
                           </div>
 
@@ -2258,7 +2306,11 @@ export function TripDetailClient({ tripId }: Props) {
                                 ))}
                               </div>
                             ) : (
-                              <p className="mt-1 text-muted">No outgoing settlements</p>
+                              <p className="mt-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-emerald-700">
+                                {isFullySettled
+                                  ? "Nothing to pay. You are all caught up 💚"
+                                  : "No outgoing settlements pending. Great job ✅"}
+                              </p>
                             )}
                           </div>
                         </div>
