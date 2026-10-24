@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/client";
 import { COMMON_CURRENCIES, EXPENSE_CATEGORIES, type ExpenseCategory } from "@/lib/finance-options";
 import { formatCurrency } from "@/lib/money";
@@ -93,6 +93,15 @@ type TransferFxQuote = {
 
 type SettlementStatus = "pending" | "approved" | "rejected";
 
+type SettlementReceipt = {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  uploadedByMemberId: string;
+  createdAt: string;
+};
+
 type Balance = {
   memberId: string;
   currency: string;
@@ -111,6 +120,7 @@ type Settlement = {
   status: SettlementStatus;
   reviewedByMemberId: string | null;
   reviewedAt: string | null;
+  receipts?: SettlementReceipt[];
   createdByMemberId: string;
   createdAt: string;
 };
@@ -343,6 +353,7 @@ export function TripDetailClient({ tripId }: Props) {
   const [settlementTo, setSettlementTo] = useState("");
   const [settlementCurrency, setSettlementCurrency] = useState("USD");
   const [settlementAmount, setSettlementAmount] = useState("");
+  const [settlementReceiptFileForRequest, setSettlementReceiptFileForRequest] = useState<File | null>(null);
   const [settlingTransferKey, setSettlingTransferKey] = useState<string | null>(null);
   const [isSettlingAll, setIsSettlingAll] = useState(false);
   const [receiptFileForExpense, setReceiptFileForExpense] = useState<File | null>(null);
@@ -1480,32 +1491,137 @@ export function TripDetailClient({ tripId }: Props) {
     }
   }
 
+  async function uploadSettlementReceiptForRequest(settlementId: string, file: File) {
+    const presign = await api<{ uploadUrl: string; storageKey: string }>(
+      "/api/settlement-receipts/presign",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          tripId,
+          settlementId,
+          fileName: file.name,
+          mimeType: file.type,
+          sizeBytes: file.size,
+        }),
+      }
+    );
+
+    const uploadResponse = await fetch(presign.uploadUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": file.type,
+      },
+      body: file,
+    });
+
+    if (!uploadResponse.ok) {
+      throw new Error("Upload failed");
+    }
+
+    await api("/api/settlement-receipts/complete", {
+      method: "POST",
+      body: JSON.stringify({
+        tripId,
+        settlementId,
+        storageKey: presign.storageKey,
+        fileName: file.name,
+        mimeType: file.type,
+        sizeBytes: file.size,
+      }),
+    });
+  }
+
+  async function attachSettlementScreenshot(settlementId: string, file: File) {
+    try {
+      await withActionLoading(
+        `attach-settlement-screenshot-${settlementId}`,
+        async () => {
+          await uploadSettlementReceiptForRequest(settlementId, file);
+          await loadAll();
+        },
+        "Screenshot uploaded"
+      );
+    } catch (attachError) {
+      setError(toUserFriendlyError(attachError, "Could not upload settlement screenshot."));
+    }
+  }
+
+  async function handleSettlementScreenshotSelect(
+    settlementId: string,
+    event: ChangeEvent<HTMLInputElement>
+  ) {
+    const file = event.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    await attachSettlementScreenshot(settlementId, file);
+    event.target.value = "";
+  }
+
   async function addSettlement(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const idempotencyKey = createIdempotencyKey("manual-settlement");
+    const hasScreenshotAttachment = Boolean(settlementReceiptFileForRequest);
 
     try {
       await withActionLoading(
         "add-settlement",
         async () => {
-          await api(`/api/trips/${tripId}/settlements`, {
-            method: "POST",
-            headers: {
-              "Idempotency-Key": idempotencyKey,
-            },
-            body: JSON.stringify({
-              fromMemberId: settlementFrom,
-              toMemberId: settlementTo,
-              currency: settlementCurrency,
-              amountCents: centsFromAmount(settlementAmount),
-              paidAt: new Date().toISOString(),
-            }),
-          });
+          const response = await api<{ settlementId?: string; duplicatePending?: boolean }>(
+            `/api/trips/${tripId}/settlements`,
+            {
+              method: "POST",
+              headers: {
+                "Idempotency-Key": idempotencyKey,
+              },
+              body: JSON.stringify({
+                fromMemberId: settlementFrom,
+                toMemberId: settlementTo,
+                currency: settlementCurrency,
+                amountCents: centsFromAmount(settlementAmount),
+                paidAt: new Date().toISOString(),
+              }),
+            }
+          );
+
+          let screenshotUploadFailed = false;
+
+          if (settlementReceiptFileForRequest && response.settlementId) {
+            try {
+              await uploadSettlementReceiptForRequest(response.settlementId, settlementReceiptFileForRequest);
+            } catch {
+              screenshotUploadFailed = true;
+            }
+          }
 
           setSettlementAmount("");
+          setSettlementReceiptFileForRequest(null);
           await loadAll();
+
+          if (screenshotUploadFailed) {
+            setToast({
+              tone: "info",
+              message:
+                "Settlement request sent, but screenshot upload failed. You can attach it from Your Pending Requests.",
+            });
+            return;
+          }
+
+          if (hasScreenshotAttachment) {
+            setToast({ tone: "success", message: "Settlement request sent with screenshot" });
+            return;
+          }
+
+          if (response.duplicatePending) {
+            setToast({ tone: "info", message: "Matching settlement request is already pending" });
+            return;
+          }
+
+          setToast({ tone: "success", message: "Settlement request sent" });
         },
-        "Settlement request sent"
+        undefined
       );
     } catch (settlementError) {
       setError(toUserFriendlyError(settlementError, "Could not request settlement."));
@@ -2071,6 +2187,22 @@ export function TripDetailClient({ tripId }: Props) {
                             Claimed paid at {new Date(settlement.paidAt).toLocaleString()} • Requested at{" "}
                             {new Date(settlement.createdAt).toLocaleString()}
                           </p>
+                          {settlement.receipts?.length ? (
+                            <div className="mt-2 space-y-1">
+                              <p className="text-xs font-semibold uppercase tracking-wide text-muted">Payment screenshot</p>
+                              {settlement.receipts.map((receipt) => (
+                                <a
+                                  key={`pending-incoming-receipt-${settlement.id}-${receipt.id}`}
+                                  className="text-xs text-[var(--accent)] hover:underline"
+                                  href={`/api/trips/${tripId}/settlements/${settlement.id}/receipts/${receipt.id}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  View {receipt.fileName} ({formatFileSize(receipt.sizeBytes)})
+                                </a>
+                              ))}
+                            </div>
+                          ) : null}
                           <div className="mt-2 flex gap-2">
                             <button
                               type="button"
@@ -2104,18 +2236,48 @@ export function TripDetailClient({ tripId }: Props) {
                 </p>
                 {pendingOutgoingSettlements.length ? (
                   <div className="mt-2 space-y-2">
-                    {pendingOutgoingSettlements.map((settlement) => (
-                      <div key={`outgoing-pending-${settlement.id}`} className="rounded-lg border border-[var(--line)] bg-[var(--background)] px-2 py-2">
-                        <p>
-                          Waiting for <strong>{memberName.get(settlement.toMemberId) ?? settlement.toMemberId}</strong>{" "}
-                          to approve {formatCurrency(settlement.amountCents, settlement.currency)}
-                        </p>
-                        <p className="text-xs text-muted">
-                          Claimed paid at {new Date(settlement.paidAt).toLocaleString()} • Requested at{" "}
-                          {new Date(settlement.createdAt).toLocaleString()}
-                        </p>
-                      </div>
-                    ))}
+                    {pendingOutgoingSettlements.map((settlement) => {
+                      const attachKey = `attach-settlement-screenshot-${settlement.id}`;
+
+                      return (
+                        <div key={`outgoing-pending-${settlement.id}`} className="rounded-lg border border-[var(--line)] bg-[var(--background)] px-2 py-2">
+                          <p>
+                            Waiting for <strong>{memberName.get(settlement.toMemberId) ?? settlement.toMemberId}</strong>{" "}
+                            to approve {formatCurrency(settlement.amountCents, settlement.currency)}
+                          </p>
+                          <p className="text-xs text-muted">
+                            Claimed paid at {new Date(settlement.paidAt).toLocaleString()} • Requested at{" "}
+                            {new Date(settlement.createdAt).toLocaleString()}
+                          </p>
+                          {settlement.receipts?.length ? (
+                            <div className="mt-2 space-y-1">
+                              <p className="text-xs font-semibold uppercase tracking-wide text-muted">Payment screenshot</p>
+                              {settlement.receipts.map((receipt) => (
+                                <a
+                                  key={`pending-outgoing-receipt-${settlement.id}-${receipt.id}`}
+                                  className="text-xs text-[var(--accent)] hover:underline"
+                                  href={`/api/trips/${tripId}/settlements/${settlement.id}/receipts/${receipt.id}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  View {receipt.fileName} ({formatFileSize(receipt.sizeBytes)})
+                                </a>
+                              ))}
+                            </div>
+                          ) : null}
+                          <label className="mt-2 block text-xs text-muted">
+                            {settlement.receipts?.length ? "Add another screenshot (optional)" : "Attach payment screenshot (optional)"}
+                            <input
+                              className="mt-1 w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm"
+                              type="file"
+                              accept="image/jpeg,image/png,image/webp,application/pdf"
+                              disabled={isActionLoading(attachKey)}
+                              onChange={(event) => void handleSettlementScreenshotSelect(settlement.id, event)}
+                            />
+                          </label>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
                   <p className="mt-2 text-muted">You have no pending settlement requests.</p>
@@ -2484,6 +2646,20 @@ export function TripDetailClient({ tripId }: Props) {
               </button>
             </div>
           </form>
+          <label className="mt-2 block text-xs text-muted">
+            Payment screenshot (optional)
+            <input
+              className="mt-1 w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm"
+              type="file"
+              accept="image/jpeg,image/png,image/webp,application/pdf"
+              onChange={(event) => setSettlementReceiptFileForRequest(event.target.files?.[0] ?? null)}
+            />
+            {settlementReceiptFileForRequest ? (
+              <span className="mt-1 block text-xs text-muted">
+                Selected: {settlementReceiptFileForRequest.name} ({formatFileSize(settlementReceiptFileForRequest.size)})
+              </span>
+            ) : null}
+          </label>
           </div>
 
           <div className="mt-6">
@@ -2625,6 +2801,22 @@ export function TripDetailClient({ tripId }: Props) {
                         </p>
                       ) : null}
                       {settlement.notes ? <p className="text-xs text-muted">Notes: {settlement.notes}</p> : null}
+                      {settlement.receipts?.length ? (
+                        <div className="mt-1 space-y-1">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-muted">Payment screenshot</p>
+                          {settlement.receipts.map((receipt) => (
+                            <a
+                              key={`history-settlement-receipt-${settlement.id}-${receipt.id}`}
+                              className="block text-xs text-[var(--accent)] hover:underline"
+                              href={`/api/trips/${tripId}/settlements/${settlement.id}/receipts/${receipt.id}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              View {receipt.fileName} ({formatFileSize(receipt.sizeBytes)})
+                            </a>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })

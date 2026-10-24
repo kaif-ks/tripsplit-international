@@ -50,6 +50,13 @@
       "when": 1793366400000,
       "tag": "0006_settlement_approval",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793412000000,
+      "tag": "0007_settlement_receipts",
+      "breakpoints": true
     }
   ]
 }

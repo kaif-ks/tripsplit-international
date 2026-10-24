@@ -90,3 +90,20 @@ export const receiptPresignSchema = z.object({
   mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "application/pdf"]),
   sizeBytes: z.number().int().positive().max(20 * 1024 * 1024),
 });
+
+export const settlementReceiptPresignSchema = z.object({
+  tripId: z.string().min(8),
+  settlementId: z.string().min(8),
+  fileName: z.string().min(1).max(260),
+  mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "application/pdf"]),
+  sizeBytes: z.number().int().positive().max(20 * 1024 * 1024),
+});
+
+export const settlementReceiptCompleteSchema = z.object({
+  tripId: z.string().min(8),
+  settlementId: z.string().min(8),
+  storageKey: z.string().min(5),
+  fileName: z.string().min(1).max(260),
+  mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "application/pdf"]),
+  sizeBytes: z.number().int().positive().max(20 * 1024 * 1024),
+});

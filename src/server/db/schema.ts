@@ -194,6 +194,25 @@ export const settlements = pgTable(
   ]
 );
 
+export const settlementReceipts = pgTable(
+  "settlement_receipts",
+  {
+    id: text("id").primaryKey(),
+    settlementId: text("settlement_id")
+      .references(() => settlements.id, { onDelete: "cascade" })
+      .notNull(),
+    storageKey: text("storage_key").notNull(),
+    fileName: varchar("file_name", { length: 260 }).notNull(),
+    mimeType: varchar("mime_type", { length: 120 }).notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    uploadedByMemberId: text("uploaded_by_member_id")
+      .references(() => tripMembers.id, { onDelete: "restrict" })
+      .notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index("settlement_receipts_settlement_idx").on(table.settlementId)]
+);
+
 export const settlementRequestKeys = pgTable(
   "settlement_request_keys",
   {

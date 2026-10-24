@@ -3,7 +3,12 @@ import { nanoid } from "nanoid";
 import { NextRequest } from "next/server";
 import { requireUser } from "@/server/auth/require-user";
 import { db } from "@/server/db";
-import { settlementRequestKeys, settlements, tripMembers } from "@/server/db/schema";
+import {
+  settlementReceipts,
+  settlementRequestKeys,
+  settlements,
+  tripMembers,
+} from "@/server/db/schema";
 import { badRequest, created, forbidden, ok, unauthorized } from "@/server/http";
 import { createSettlementSchema } from "@/server/validators";
 
@@ -55,7 +60,54 @@ export async function GET(request: NextRequest, context: Params) {
     .where(eq(settlements.tripId, tripId))
     .orderBy(desc(settlements.createdAt), desc(settlements.id));
 
-  return ok({ settlements: rows });
+  const settlementIds = rows.map((row) => row.id);
+  const receiptRows = settlementIds.length
+    ? await db
+        .select({
+          id: settlementReceipts.id,
+          settlementId: settlementReceipts.settlementId,
+          fileName: settlementReceipts.fileName,
+          mimeType: settlementReceipts.mimeType,
+          sizeBytes: settlementReceipts.sizeBytes,
+          uploadedByMemberId: settlementReceipts.uploadedByMemberId,
+          createdAt: settlementReceipts.createdAt,
+        })
+        .from(settlementReceipts)
+        .where(inArray(settlementReceipts.settlementId, settlementIds))
+        .orderBy(desc(settlementReceipts.createdAt))
+    : [];
+
+  const receiptsBySettlement = new Map<
+    string,
+    Array<{
+      id: string;
+      fileName: string;
+      mimeType: string;
+      sizeBytes: number;
+      uploadedByMemberId: string;
+      createdAt: Date;
+    }>
+  >();
+
+  for (const receipt of receiptRows) {
+    const existing = receiptsBySettlement.get(receipt.settlementId) ?? [];
+    existing.push({
+      id: receipt.id,
+      fileName: receipt.fileName,
+      mimeType: receipt.mimeType,
+      sizeBytes: receipt.sizeBytes,
+      uploadedByMemberId: receipt.uploadedByMemberId,
+      createdAt: receipt.createdAt,
+    });
+    receiptsBySettlement.set(receipt.settlementId, existing);
+  }
+
+  return ok({
+    settlements: rows.map((row) => ({
+      ...row,
+      receipts: receiptsBySettlement.get(row.id) ?? [],
+    })),
+  });
 }
 
 export async function POST(request: NextRequest, context: Params) {
