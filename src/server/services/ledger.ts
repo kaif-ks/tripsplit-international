@@ -8,6 +8,7 @@ export type MemberMeta = {
   memberId: string;
   email: string;
   displayName: string;
+  preferredSettlementCurrency: string | null;
 };
 
 export type CurrencyBalance = {
@@ -22,6 +23,7 @@ export async function computeTripBalances(tripId: string) {
       id: tripMembers.id,
       email: tripMembers.email,
       displayName: tripMembers.displayName,
+      preferredSettlementCurrency: tripMembers.preferredSettlementCurrency,
     })
     .from(tripMembers)
     .where(eq(tripMembers.tripId, tripId));
@@ -118,6 +120,7 @@ export async function computeTripBalances(tripId: string) {
       memberId: member.id,
       email: member.email,
       displayName: member.displayName ?? member.email,
+      preferredSettlementCurrency: member.preferredSettlementCurrency,
     })),
     balances,
   };

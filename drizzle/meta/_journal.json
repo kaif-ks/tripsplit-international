@@ -36,6 +36,13 @@
       "when": 1791972141890,
       "tag": "0004_default_currency_and_categories",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792842000000,
+      "tag": "0005_member_preferred_currency",
+      "breakpoints": true
     }
   ]
 }

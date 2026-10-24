@@ -10,6 +10,7 @@ type Member = {
   id: string;
   email: string;
   displayName: string | null;
+  preferredSettlementCurrency: string | null;
   role: "owner" | "admin" | "member";
   joinedAt: string | null;
 };
@@ -76,6 +77,18 @@ type Transfer = {
   toMemberId: string;
   currency: string;
   amountCents: number;
+};
+
+type TransferFxQuote = {
+  fromMemberId: string;
+  toMemberId: string;
+  sourceCurrency: string;
+  sourceAmountCents: number;
+  targetCurrency: string;
+  targetAmountCents: number;
+  rate: number;
+  quotedAt: string;
+  source: "frankfurter" | "identity";
 };
 
 type Balance = {
@@ -230,6 +243,22 @@ function formatFileSize(sizeBytes: number) {
   return `${sizeBytes} B`;
 }
 
+function transferKey(transfer: Transfer) {
+  return `${transfer.fromMemberId}:${transfer.toMemberId}:${transfer.currency}:${transfer.amountCents}`;
+}
+
+function formatFxRate(rate: number) {
+  if (rate >= 1000) {
+    return rate.toFixed(2);
+  }
+
+  if (rate >= 1) {
+    return rate.toFixed(4);
+  }
+
+  return rate.toFixed(6);
+}
+
 export function TripDetailClient({ tripId }: Props) {
   const [tripData, setTripData] = useState<TripData | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -237,6 +266,7 @@ export function TripDetailClient({ tripId }: Props) {
   const [deletedExpenses, setDeletedExpenses] = useState<DeletedExpense[]>([]);
   const [balances, setBalances] = useState<Balance[]>([]);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
+  const [transferFx, setTransferFx] = useState<TransferFxQuote[]>([]);
   const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [currencySummaries, setCurrencySummaries] = useState<CurrencySummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -279,6 +309,7 @@ export function TripDetailClient({ tripId }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [transferFromFilter, setTransferFromFilter] = useState("");
   const [transferToFilter, setTransferToFilter] = useState("");
+  const [preferredSettlementCurrencyDraft, setPreferredSettlementCurrencyDraft] = useState("");
   const [expenseSearch, setExpenseSearch] = useState("");
   const [expenseCategoryFilter, setExpenseCategoryFilter] = useState<ExpenseCategory | "">("");
   const [expenseCurrencyFilter, setExpenseCurrencyFilter] = useState("");
@@ -293,6 +324,22 @@ export function TripDetailClient({ tripId }: Props) {
 
     return map;
   }, [members]);
+
+  const currentMember = useMemo(
+    () => members.find((member) => member.id === tripData?.membership.id) ?? null,
+    [members, tripData?.membership.id]
+  );
+
+  const transferFxByKey = useMemo(
+    () =>
+      new Map(
+        transferFx.map((quote) => [
+          `${quote.fromMemberId}:${quote.toMemberId}:${quote.sourceCurrency}:${quote.sourceAmountCents}`,
+          quote,
+        ])
+      ),
+    [transferFx]
+  );
 
   const joinLink = useMemo(() => {
     if (!tripData?.trip.joinCode) {
@@ -602,13 +649,17 @@ export function TripDetailClient({ tripId }: Props) {
         api<TripData>(`/api/trips/${tripId}`),
         api<{ members: Member[] }>(`/api/trips/${tripId}/members`),
         api<{ expenses: Expense[]; deletedExpenses: DeletedExpense[] }>(`/api/trips/${tripId}/expenses`),
-        api<{ balances: Balance[]; transfers: Transfer[] }>(`/api/trips/${tripId}/balances`),
+        api<{ balances: Balance[]; transfers: Transfer[]; transferFx: TransferFxQuote[] }>(
+          `/api/trips/${tripId}/balances`
+        ),
           api<{ settlements: Settlement[] }>(`/api/trips/${tripId}/settlements`),
           api<{ summaries: CurrencySummary[] }>(`/api/trips/${tripId}/summary`),
         ]);
 
       setTripData(trip);
       setMembers(membersResponse.members);
+      const selfMember = membersResponse.members.find((member) => member.id === trip.membership.id);
+      setPreferredSettlementCurrencyDraft(selfMember?.preferredSettlementCurrency ?? "");
       setPayers((current) => {
         if (membersResponse.members.length && current.length === 1 && !current[0].memberId) {
           return [{ ...current[0], memberId: membersResponse.members[0].id }];
@@ -633,6 +684,7 @@ export function TripDetailClient({ tripId }: Props) {
       setDeletedExpenses(expensesResponse.deletedExpenses);
       setBalances(balanceResponse.balances);
       setTransfers(balanceResponse.transfers);
+      setTransferFx(balanceResponse.transferFx ?? []);
       setSettlements(settlementsResponse.settlements);
       setCurrencySummaries(summaryResponse.summaries);
       setSimplifyTransfers(trip.trip.simplifyTransfers);
@@ -670,6 +722,31 @@ export function TripDetailClient({ tripId }: Props) {
       );
     } catch (settingsError) {
       setError(toUserFriendlyError(settingsError, "Could not update settings."));
+    }
+  }
+
+  async function savePreferredSettlementCurrency(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    try {
+      await withActionLoading(
+        "update-preferred-settlement-currency",
+        async () => {
+          await api(`/api/trips/${tripId}/members`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              preferredSettlementCurrency: preferredSettlementCurrencyDraft || null,
+            }),
+          });
+
+          await loadAll();
+        },
+        preferredSettlementCurrencyDraft
+          ? `Expected currency set to ${preferredSettlementCurrencyDraft}`
+          : "Expected currency reset to original transfer currency"
+      );
+    } catch (preferenceError) {
+      setError(toUserFriendlyError(preferenceError, "Could not update expected settlement currency."));
     }
   }
 
@@ -1201,10 +1278,10 @@ export function TripDetailClient({ tripId }: Props) {
   }
 
   async function settleTransfer(transfer: Transfer) {
-    const transferKey = `${transfer.fromMemberId}:${transfer.toMemberId}:${transfer.currency}:${transfer.amountCents}`;
+    const key = transferKey(transfer);
     setError("");
-    setSettlingTransferKey(transferKey);
-    const idempotencyKey = createIdempotencyKey(`transfer-${transferKey.replaceAll(":", "-")}`);
+    setSettlingTransferKey(key);
+    const idempotencyKey = createIdempotencyKey(`transfer-${key.replaceAll(":", "-")}`);
 
     try {
       await createSettlementFromTransfer(transfer, idempotencyKey);
@@ -1272,8 +1349,8 @@ export function TripDetailClient({ tripId }: Props) {
 
       for (const transfer of filteredTransfers) {
         try {
-          const transferKey = `${transfer.fromMemberId}:${transfer.toMemberId}:${transfer.currency}:${transfer.amountCents}`;
-          const idempotencyKey = createIdempotencyKey(`bulk-${transferKey.replaceAll(":", "-")}`);
+          const key = transferKey(transfer);
+          const idempotencyKey = createIdempotencyKey(`bulk-${key.replaceAll(":", "-")}`);
           await createSettlementFromTransfer(transfer, idempotencyKey);
           settledCount += 1;
         } catch (transferError) {
@@ -1346,12 +1423,13 @@ export function TripDetailClient({ tripId }: Props) {
   }
 
   async function refreshBalances(useSimplify: boolean) {
-    const response = await api<{ balances: Balance[]; transfers: Transfer[] }>(
+    const response = await api<{ balances: Balance[]; transfers: Transfer[]; transferFx: TransferFxQuote[] }>(
       `/api/trips/${tripId}/balances?simplify=${useSimplify}`
     );
 
     setBalances(response.balances);
     setTransfers(response.transfers);
+    setTransferFx(response.transferFx ?? []);
   }
 
   async function toggleSimplify(nextValue: boolean) {
@@ -1533,11 +1611,48 @@ export function TripDetailClient({ tripId }: Props) {
         {activeTab === "members" ? (
         <section className="card p-5 lg:col-span-3">
           <h2 className="mb-3 text-2xl">Members</h2>
+          <form
+            className="mb-4 rounded-xl border border-[var(--line)] bg-white p-3"
+            onSubmit={(event) => void savePreferredSettlementCurrency(event)}
+          >
+            <p className="text-sm font-semibold">Your expected settlement currency</p>
+            <p className="mt-1 text-xs text-muted">
+              When someone pays you back, we will show an approximate converted amount in this currency.
+            </p>
+            <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+              <select
+                className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm sm:max-w-xs"
+                value={preferredSettlementCurrencyDraft}
+                onChange={(event) => setPreferredSettlementCurrencyDraft(event.target.value)}
+              >
+                <option value="">Use original transfer currency</option>
+                {selectableCurrencies.map((currency) => (
+                  <option key={`preferred-settlement-${currency}`} value={currency}>
+                    {currency}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="submit"
+                className="btn-secondary rounded-xl px-3 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={
+                  isActionLoading("update-preferred-settlement-currency") ||
+                  (currentMember?.preferredSettlementCurrency ?? "") === preferredSettlementCurrencyDraft
+                }
+              >
+                {isActionLoading("update-preferred-settlement-currency") ? "Saving..." : "Save preference"}
+              </button>
+            </div>
+          </form>
+
           <ul className="space-y-2 text-sm">
             {members.map((member) => (
               <li key={member.id} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
                 <p className="font-semibold">{member.displayName || member.email}</p>
                 <p className="text-muted">{member.email}</p>
+                <p className="text-xs text-muted">
+                  Expected currency: {member.preferredSettlementCurrency ?? "Original transfer currency"}
+                </p>
                 <p className="text-xs uppercase tracking-wide text-muted">
                   {member.role} {member.joinedAt ? "• joined" : ""}
                 </p>
@@ -1680,34 +1795,41 @@ export function TripDetailClient({ tripId }: Props) {
               <h3 className="mb-2 text-lg">Grouped by currency</h3>
               <div className="space-y-2 text-sm">
                 {filteredTransfers.length ? (
-                  filteredTransfers.map((transfer, index) => (
-                    <div
-                      key={`${transfer.fromMemberId}-${transfer.toMemberId}-${index}`}
-                      className="rounded-lg border border-[var(--line)] bg-white px-3 py-2"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <p>
-                          <strong>{memberName.get(transfer.fromMemberId)}</strong> pays{" "}
-                          <strong>{memberName.get(transfer.toMemberId)}</strong>{" "}
-                          {formatCurrency(transfer.amountCents, transfer.currency)}
-                        </p>
-                        <button
-                          type="button"
-                          className="btn-secondary rounded-lg px-2 py-1 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={
-                            settlingTransferKey ===
-                            `${transfer.fromMemberId}:${transfer.toMemberId}:${transfer.currency}:${transfer.amountCents}`
-                          }
-                          onClick={() => void settleTransfer(transfer)}
-                        >
-                          {settlingTransferKey ===
-                          `${transfer.fromMemberId}:${transfer.toMemberId}:${transfer.currency}:${transfer.amountCents}`
-                            ? "Settling..."
-                            : "Settle"}
-                        </button>
+                  filteredTransfers.map((transfer, index) => {
+                    const key = transferKey(transfer);
+                    const quote = transferFxByKey.get(key);
+
+                    return (
+                      <div
+                        key={`${transfer.fromMemberId}-${transfer.toMemberId}-${index}`}
+                        className="rounded-lg border border-[var(--line)] bg-white px-3 py-2"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p>
+                            <strong>{memberName.get(transfer.fromMemberId)}</strong> pays{" "}
+                            <strong>{memberName.get(transfer.toMemberId)}</strong>{" "}
+                            {formatCurrency(transfer.amountCents, transfer.currency)}
+                          </p>
+                          <button
+                            type="button"
+                            className="btn-secondary rounded-lg px-2 py-1 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                            disabled={settlingTransferKey === key}
+                            onClick={() => void settleTransfer(transfer)}
+                          >
+                            {settlingTransferKey === key ? "Settling..." : "Settle"}
+                          </button>
+                        </div>
+
+                        {quote ? (
+                          <p className="mt-1 text-xs text-muted">
+                            ~{formatCurrency(quote.targetAmountCents, quote.targetCurrency)} in expected currency ({quote.targetCurrency}) •
+                            rate 1 {quote.sourceCurrency} = {formatFxRate(quote.rate)} {quote.targetCurrency} • as of{" "}
+                            {new Date(quote.quotedAt).toLocaleString()}
+                          </p>
+                        ) : null}
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 ) : (
                   <p className="text-muted">No pending transfers for this filter</p>
                 )}

@@ -63,6 +63,7 @@ export const tripMembers = pgTable(
     userId: text("user_id").references(() => users.id, { onDelete: "set null" }),
     email: varchar("email", { length: 320 }).notNull(),
     displayName: varchar("display_name", { length: 200 }),
+    preferredSettlementCurrency: varchar("preferred_settlement_currency", { length: 3 }),
     role: memberRoleEnum("role").default("member").notNull(),
     joinedAt: timestamp("joined_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
