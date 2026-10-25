@@ -25,6 +25,14 @@ type MemberTripTotalSummary = {
   totalTripCents: number;
 };
 
+type MemberTripTotalApproxSummary = {
+  memberId: string;
+  targetCurrency: string;
+  totalApproxCents: number;
+  approximateConversionCount: number;
+  unconvertedCurrencyCount: number;
+};
+
 type CategorySummary = {
   category: string;
   spentCents: number;
@@ -49,6 +57,18 @@ export async function GET(request: NextRequest, context: Params) {
   if (!membership) {
     return forbidden();
   }
+
+  const tripMemberRows = await db
+    .select({
+      id: tripMembers.id,
+      preferredSettlementCurrency: tripMembers.preferredSettlementCurrency,
+    })
+    .from(tripMembers)
+    .where(eq(tripMembers.tripId, tripId));
+
+  const preferredCurrencyByMemberId = new Map(
+    tripMemberRows.map((row) => [row.id, row.preferredSettlementCurrency])
+  );
 
   const tripExpenses = await db
     .select({
@@ -201,6 +221,16 @@ export async function GET(request: NextRequest, context: Params) {
     conversionPairs.add(`${expense.currency}:${defaultCurrency}`);
   }
 
+  for (const row of memberTripTotals) {
+    const targetCurrency = preferredCurrencyByMemberId.get(row.memberId);
+
+    if (!targetCurrency || targetCurrency === row.currency) {
+      continue;
+    }
+
+    conversionPairs.add(`${row.currency}:${targetCurrency}`);
+  }
+
   const quotesByPair = new Map<string, Awaited<ReturnType<typeof getFxQuote>>>();
 
   await Promise.all(
@@ -257,9 +287,55 @@ export async function GET(request: NextRequest, context: Params) {
   const totalNetCents = rankedCategories.reduce((sum, row) => sum + row.netCents, 0);
   const topNetCents = rankedCategories[0]?.netCents ?? 0;
 
+  const memberTripTotalsApproxByMemberId = new Map<string, MemberTripTotalApproxSummary>();
+
+  for (const row of memberTripTotals) {
+    const targetCurrency = preferredCurrencyByMemberId.get(row.memberId);
+
+    if (!targetCurrency) {
+      continue;
+    }
+
+    const existing = memberTripTotalsApproxByMemberId.get(row.memberId) ?? {
+      memberId: row.memberId,
+      targetCurrency,
+      totalApproxCents: 0,
+      approximateConversionCount: 0,
+      unconvertedCurrencyCount: 0,
+    };
+
+    if (row.currency === targetCurrency) {
+      existing.totalApproxCents += row.totalTripCents;
+      memberTripTotalsApproxByMemberId.set(row.memberId, existing);
+      continue;
+    }
+
+    const pair = `${row.currency}:${targetCurrency}`;
+    const quote = quotesByPair.get(pair);
+
+    if (!quote) {
+      existing.unconvertedCurrencyCount += 1;
+      memberTripTotalsApproxByMemberId.set(row.memberId, existing);
+      continue;
+    }
+
+    existing.totalApproxCents += Math.round(row.totalTripCents * quote.rate);
+
+    if (quote.source !== "identity") {
+      existing.approximateConversionCount += 1;
+    }
+
+    memberTripTotalsApproxByMemberId.set(row.memberId, existing);
+  }
+
+  const memberTripTotalsApprox = [...memberTripTotalsApproxByMemberId.values()].sort((left, right) =>
+    left.memberId.localeCompare(right.memberId)
+  );
+
   return ok({
     summaries,
     memberTripTotals,
+    memberTripTotalsApprox,
     categoryCumulative: {
       currency: defaultCurrency,
       ranked: rankedCategories,

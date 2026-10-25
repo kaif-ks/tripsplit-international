@@ -138,6 +138,14 @@ type MemberTripTotal = {
   totalTripCents: number;
 };
 
+type MemberTripTotalApprox = {
+  memberId: string;
+  targetCurrency: string;
+  totalApproxCents: number;
+  approximateConversionCount: number;
+  unconvertedCurrencyCount: number;
+};
+
 type CategoryCumulative = {
   currency: string;
   ranked: Array<{
@@ -335,6 +343,7 @@ export function TripDetailClient({ tripId }: Props) {
   const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [currencySummaries, setCurrencySummaries] = useState<CurrencySummary[]>([]);
   const [memberTripTotals, setMemberTripTotals] = useState<MemberTripTotal[]>([]);
+  const [memberTripTotalsApprox, setMemberTripTotalsApprox] = useState<MemberTripTotalApprox[]>([]);
   const [categoryCumulative, setCategoryCumulative] = useState<CategoryCumulative | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -361,6 +370,9 @@ export function TripDetailClient({ tripId }: Props) {
   const [settlementCurrency, setSettlementCurrency] = useState("USD");
   const [settlementAmount, setSettlementAmount] = useState("");
   const [settlementReceiptFileForRequest, setSettlementReceiptFileForRequest] = useState<File | null>(null);
+  const [settlementReceiptFileByTransferKey, setSettlementReceiptFileByTransferKey] = useState<
+    Record<string, File | null>
+  >({});
   const [settlingTransferKey, setSettlingTransferKey] = useState<string | null>(null);
   const [isSettlingAll, setIsSettlingAll] = useState(false);
   const [receiptFileForExpense, setReceiptFileForExpense] = useState<File | null>(null);
@@ -489,6 +501,11 @@ export function TripDetailClient({ tripId }: Props) {
 
     return grouped;
   }, [memberTripTotals]);
+
+  const memberTripTotalsApproxByMemberId = useMemo(
+    () => new Map(memberTripTotalsApprox.map((row) => [row.memberId, row])),
+    [memberTripTotalsApprox]
+  );
 
   const pendingIncomingSettlements = useMemo(
     () =>
@@ -907,6 +924,7 @@ export function TripDetailClient({ tripId }: Props) {
           api<{
             summaries: CurrencySummary[];
             memberTripTotals: MemberTripTotal[];
+            memberTripTotalsApprox: MemberTripTotalApprox[];
             categoryCumulative: CategoryCumulative;
           }>(
             `/api/trips/${tripId}/summary`
@@ -952,6 +970,7 @@ export function TripDetailClient({ tripId }: Props) {
       setSettlements(settlementsResponse.settlements);
       setCurrencySummaries(summaryResponse.summaries);
       setMemberTripTotals(summaryResponse.memberTripTotals ?? []);
+      setMemberTripTotalsApprox(summaryResponse.memberTripTotalsApprox ?? []);
       setCategoryCumulative(summaryResponse.categoryCumulative);
       setSimplifyTransfers(trip.trip.simplifyTransfers);
       setLockAfterSettlement(trip.trip.lockAfterSettlement);
@@ -1684,7 +1703,7 @@ export function TripDetailClient({ tripId }: Props) {
     }
   }
 
-  async function settleTransfer(transfer: Transfer) {
+  async function settleTransfer(transfer: Transfer, screenshotFile?: File | null) {
     const key = transferKey(transfer);
 
     if (pendingTransferRequestKeys.has(key)) {
@@ -1710,9 +1729,42 @@ export function TripDetailClient({ tripId }: Props) {
     const idempotencyKey = createIdempotencyKey(`transfer-${key.replaceAll(":", "-")}`);
 
     try {
-      await createSettlementFromTransfer(transfer, idempotencyKey);
+      const response = await createSettlementFromTransfer(transfer, idempotencyKey);
+      let screenshotUploadFailed = false;
+
+      if (screenshotFile && response.settlementId) {
+        try {
+          await uploadSettlementReceiptForRequest(response.settlementId, screenshotFile);
+        } catch {
+          screenshotUploadFailed = true;
+        }
+      }
 
       await loadAll();
+      setSettlementReceiptFileByTransferKey((current) => ({
+        ...current,
+        [key]: null,
+      }));
+
+      if (screenshotUploadFailed) {
+        setToast({
+          tone: "info",
+          message:
+            "Settlement request sent, but screenshot upload failed. You can attach it from Your Pending Requests.",
+        });
+        return;
+      }
+
+      if (screenshotFile) {
+        setToast({ tone: "success", message: "Settlement request sent with screenshot" });
+        return;
+      }
+
+      if (response.duplicatePending) {
+        setToast({ tone: "info", message: "Matching settlement request is already pending" });
+        return;
+      }
+
       setToast({ tone: "success", message: "Settlement request sent" });
     } catch (settleError) {
       setError(toUserFriendlyError(settleError, "Could not request this settlement."));
@@ -1722,7 +1774,7 @@ export function TripDetailClient({ tripId }: Props) {
   }
 
   async function createSettlementFromTransfer(transfer: Transfer, idempotencyKey?: string) {
-    await api(`/api/trips/${tripId}/settlements`, {
+    return await api<{ settlementId?: string; duplicatePending?: boolean }>(`/api/trips/${tripId}/settlements`, {
       method: "POST",
       headers: idempotencyKey
         ? {
@@ -2074,6 +2126,7 @@ export function TripDetailClient({ tripId }: Props) {
           <ul className="space-y-2 text-sm">
             {members.map((member) => {
               const spendRows = memberTripTotalsByMemberId.get(member.id) ?? [];
+              const spendApprox = memberTripTotalsApproxByMemberId.get(member.id) ?? null;
 
               return (
                 <li key={member.id} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
@@ -2089,6 +2142,21 @@ export function TripDetailClient({ tripId }: Props) {
                           .join(" • ")
                       : "No trip share yet"}
                   </p>
+                  {member.preferredSettlementCurrency ? (
+                    <p className="text-xs text-muted">
+                      Approx in expected currency: {spendApprox
+                        ? `${spendApprox.approximateConversionCount > 0 ? "~" : ""}${formatCurrency(
+                            spendApprox.totalApproxCents,
+                            spendApprox.targetCurrency
+                          )}`
+                        : "No trip share yet"}
+                      {spendApprox?.unconvertedCurrencyCount
+                        ? ` • ${spendApprox.unconvertedCurrencyCount} currency total${
+                            spendApprox.unconvertedCurrencyCount === 1 ? "" : "s"
+                          } pending FX`
+                        : ""}
+                    </p>
+                  ) : null}
                   <p className="text-xs uppercase tracking-wide text-muted">
                     {member.role} {member.joinedAt ? "• joined" : ""}
                   </p>
@@ -2368,6 +2436,7 @@ export function TripDetailClient({ tripId }: Props) {
                     const quote = transferFxByKey.get(key);
                     const isCurrentMemberReceiver = transfer.toMemberId === tripData?.membership.id;
                     const isAlreadyRequested = pendingTransferRequestKeys.has(key);
+                    const selectedTransferReceiptFile = settlementReceiptFileByTransferKey[key] ?? null;
                     const canRequestTransfer =
                       !isCurrentMemberReceiver &&
                       !isAlreadyRequested &&
@@ -2389,7 +2458,7 @@ export function TripDetailClient({ tripId }: Props) {
                             type="button"
                             className="btn-secondary rounded-lg px-2 py-1 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                             disabled={settlingTransferKey === key || !canRequestTransfer}
-                            onClick={() => void settleTransfer(transfer)}
+                            onClick={() => void settleTransfer(transfer, selectedTransferReceiptFile)}
                           >
                             {settlingTransferKey === key
                               ? "Requesting..."
@@ -2402,6 +2471,33 @@ export function TripDetailClient({ tripId }: Props) {
                                 : "Only payer can request"}
                           </button>
                         </div>
+
+                        {canRequestTransfer ? (
+                          <label className="mt-2 block text-xs text-muted">
+                            Payment screenshot (optional)
+                            <input
+                              className="mt-1 w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm"
+                              type="file"
+                              accept="image/jpeg,image/png,image/webp,application/pdf"
+                              disabled={settlingTransferKey === key}
+                              onChange={(event) =>
+                                setSettlementReceiptFileByTransferKey((current) => ({
+                                  ...current,
+                                  [key]: event.target.files?.[0] ?? null,
+                                }))
+                              }
+                            />
+                            {selectedTransferReceiptFile ? (
+                              <span className="mt-1 block text-xs text-muted">
+                                Selected: {selectedTransferReceiptFile.name} ({formatFileSize(selectedTransferReceiptFile.size)})
+                              </span>
+                            ) : null}
+                          </label>
+                        ) : isAlreadyRequested ? (
+                          <p className="mt-2 text-xs text-muted">
+                            Requested. You can attach a screenshot from Your Pending Requests below.
+                          </p>
+                        ) : null}
 
                         {quote ? (
                           <p className="mt-1 text-xs text-muted">
