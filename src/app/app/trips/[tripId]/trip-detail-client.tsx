@@ -132,6 +132,12 @@ type CurrencySummary = {
   yourNetCents: number;
 };
 
+type MemberSpendTotal = {
+  memberId: string;
+  currency: string;
+  totalPaidCents: number;
+};
+
 type CategoryCumulative = {
   currency: string;
   ranked: Array<{
@@ -328,6 +334,7 @@ export function TripDetailClient({ tripId }: Props) {
   const [transferFx, setTransferFx] = useState<TransferFxQuote[]>([]);
   const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [currencySummaries, setCurrencySummaries] = useState<CurrencySummary[]>([]);
+  const [memberSpendTotals, setMemberSpendTotals] = useState<MemberSpendTotal[]>([]);
   const [categoryCumulative, setCategoryCumulative] = useState<CategoryCumulative | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -467,22 +474,38 @@ export function TripDetailClient({ tripId }: Props) {
 
   const latestSettlement = approvedSettlements[0] ?? null;
 
+  const memberSpendTotalsByMemberId = useMemo(() => {
+    const grouped = new Map<string, MemberSpendTotal[]>();
+
+    for (const row of memberSpendTotals) {
+      const rows = grouped.get(row.memberId) ?? [];
+      rows.push(row);
+      grouped.set(row.memberId, rows);
+    }
+
+    for (const rows of grouped.values()) {
+      rows.sort((left, right) => right.totalPaidCents - left.totalPaidCents);
+    }
+
+    return grouped;
+  }, [memberSpendTotals]);
+
   const pendingIncomingSettlements = useMemo(
     () =>
       sortedSettlements.filter(
         (settlement) =>
-          settlement.status === "pending" && settlement.toMemberId === tripData?.membership.id
+          settlement.status === "pending" && settlement.toMemberId === tripData?.membership?.id
       ),
-    [sortedSettlements, tripData?.membership.id]
+    [sortedSettlements, tripData?.membership]
   );
 
   const pendingOutgoingSettlements = useMemo(
     () =>
       sortedSettlements.filter(
         (settlement) =>
-          settlement.status === "pending" && settlement.fromMemberId === tripData?.membership.id
+          settlement.status === "pending" && settlement.fromMemberId === tripData?.membership?.id
       ),
-    [sortedSettlements, tripData?.membership.id]
+    [sortedSettlements, tripData?.membership]
   );
 
   const filteredSettlements = useMemo(() => {
@@ -881,7 +904,11 @@ export function TripDetailClient({ tripId }: Props) {
           `/api/trips/${tripId}/balances`
         ),
           api<{ settlements: Settlement[] }>(`/api/trips/${tripId}/settlements`),
-          api<{ summaries: CurrencySummary[]; categoryCumulative: CategoryCumulative }>(
+          api<{
+            summaries: CurrencySummary[];
+            memberSpendTotals: MemberSpendTotal[];
+            categoryCumulative: CategoryCumulative;
+          }>(
             `/api/trips/${tripId}/summary`
           ),
         ]);
@@ -924,6 +951,7 @@ export function TripDetailClient({ tripId }: Props) {
       setTransferFx(balanceResponse.transferFx ?? []);
       setSettlements(settlementsResponse.settlements);
       setCurrencySummaries(summaryResponse.summaries);
+      setMemberSpendTotals(summaryResponse.memberSpendTotals ?? []);
       setCategoryCumulative(summaryResponse.categoryCumulative);
       setSimplifyTransfers(trip.trip.simplifyTransfers);
       setLockAfterSettlement(trip.trip.lockAfterSettlement);
@@ -2044,18 +2072,29 @@ export function TripDetailClient({ tripId }: Props) {
           </form>
 
           <ul className="space-y-2 text-sm">
-            {members.map((member) => (
-              <li key={member.id} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
-                <p className="font-semibold">{member.displayName || member.email}</p>
-                <p className="text-muted">{member.email}</p>
-                <p className="text-xs text-muted">
-                  Expected currency: {member.preferredSettlementCurrency ?? "Original transfer currency"}
-                </p>
-                <p className="text-xs uppercase tracking-wide text-muted">
-                  {member.role} {member.joinedAt ? "• joined" : ""}
-                </p>
-              </li>
-            ))}
+            {members.map((member) => {
+              const spendRows = memberSpendTotalsByMemberId.get(member.id) ?? [];
+
+              return (
+                <li key={member.id} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
+                  <p className="font-semibold">{member.displayName || member.email}</p>
+                  <p className="text-muted">{member.email}</p>
+                  <p className="text-xs text-muted">
+                    Expected currency: {member.preferredSettlementCurrency ?? "Original transfer currency"}
+                  </p>
+                  <p className="text-xs text-muted">
+                    Total spent: {spendRows.length
+                      ? spendRows
+                          .map((row) => formatCurrency(row.totalPaidCents, row.currency))
+                          .join(" • ")
+                      : "No recorded spend yet"}
+                  </p>
+                  <p className="text-xs uppercase tracking-wide text-muted">
+                    {member.role} {member.joinedAt ? "• joined" : ""}
+                  </p>
+                </li>
+              );
+            })}
           </ul>
 
           {canShareJoin ? (

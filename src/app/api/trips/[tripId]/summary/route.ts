@@ -18,6 +18,12 @@ type CurrencySummary = {
   yourNetCents: number;
 };
 
+type MemberSpendSummary = {
+  memberId: string;
+  currency: string;
+  totalPaidCents: number;
+};
+
 type CategorySummary = {
   category: string;
   spentCents: number;
@@ -97,6 +103,34 @@ export async function GET(request: NextRequest, context: Params) {
       (paidByYouByCurrency.get(expense.currency) ?? 0) + payer.amountCents
     );
   }
+
+  const memberSpendByCurrency = new Map<string, number>();
+
+  for (const payer of payers) {
+    const expense = expenseById.get(payer.expenseId);
+
+    if (!expense) {
+      continue;
+    }
+
+    const key = `${payer.memberId}:${expense.currency}`;
+    memberSpendByCurrency.set(key, (memberSpendByCurrency.get(key) ?? 0) + payer.amountCents);
+  }
+
+  const memberSpendTotals: MemberSpendSummary[] = [...memberSpendByCurrency.entries()]
+    .map(([key, totalPaidCents]) => {
+      const [memberId, currency] = key.split(":");
+
+      return {
+        memberId,
+        currency,
+        totalPaidCents,
+      };
+    })
+    .sort(
+      (left, right) =>
+        left.memberId.localeCompare(right.memberId) || left.currency.localeCompare(right.currency)
+    );
 
   const { balances } = await computeTripBalances(tripId);
   const netByCurrency = new Map<string, number>();
@@ -192,13 +226,14 @@ export async function GET(request: NextRequest, context: Params) {
 
   return ok({
     summaries,
+    memberSpendTotals,
     categoryCumulative: {
       currency: defaultCurrency,
       ranked: rankedCategories,
       totalSpentCents,
       topSpentCents,
-        totalNetCents,
-        topNetCents,
+      totalNetCents,
+      topNetCents,
       approximateConversionCount,
       unconvertedExpenseCount,
     },
