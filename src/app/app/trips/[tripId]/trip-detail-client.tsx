@@ -132,10 +132,10 @@ type CurrencySummary = {
   yourNetCents: number;
 };
 
-type MemberSpendTotal = {
+type MemberTripTotal = {
   memberId: string;
   currency: string;
-  totalPaidCents: number;
+  totalTripCents: number;
 };
 
 type CategoryCumulative = {
@@ -334,7 +334,7 @@ export function TripDetailClient({ tripId }: Props) {
   const [transferFx, setTransferFx] = useState<TransferFxQuote[]>([]);
   const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [currencySummaries, setCurrencySummaries] = useState<CurrencySummary[]>([]);
-  const [memberSpendTotals, setMemberSpendTotals] = useState<MemberSpendTotal[]>([]);
+  const [memberTripTotals, setMemberTripTotals] = useState<MemberTripTotal[]>([]);
   const [categoryCumulative, setCategoryCumulative] = useState<CategoryCumulative | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -474,21 +474,21 @@ export function TripDetailClient({ tripId }: Props) {
 
   const latestSettlement = approvedSettlements[0] ?? null;
 
-  const memberSpendTotalsByMemberId = useMemo(() => {
-    const grouped = new Map<string, MemberSpendTotal[]>();
+  const memberTripTotalsByMemberId = useMemo(() => {
+    const grouped = new Map<string, MemberTripTotal[]>();
 
-    for (const row of memberSpendTotals) {
+    for (const row of memberTripTotals) {
       const rows = grouped.get(row.memberId) ?? [];
       rows.push(row);
       grouped.set(row.memberId, rows);
     }
 
     for (const rows of grouped.values()) {
-      rows.sort((left, right) => right.totalPaidCents - left.totalPaidCents);
+      rows.sort((left, right) => right.totalTripCents - left.totalTripCents);
     }
 
     return grouped;
-  }, [memberSpendTotals]);
+  }, [memberTripTotals]);
 
   const pendingIncomingSettlements = useMemo(
     () =>
@@ -906,7 +906,7 @@ export function TripDetailClient({ tripId }: Props) {
           api<{ settlements: Settlement[] }>(`/api/trips/${tripId}/settlements`),
           api<{
             summaries: CurrencySummary[];
-            memberSpendTotals: MemberSpendTotal[];
+            memberTripTotals: MemberTripTotal[];
             categoryCumulative: CategoryCumulative;
           }>(
             `/api/trips/${tripId}/summary`
@@ -951,7 +951,7 @@ export function TripDetailClient({ tripId }: Props) {
       setTransferFx(balanceResponse.transferFx ?? []);
       setSettlements(settlementsResponse.settlements);
       setCurrencySummaries(summaryResponse.summaries);
-      setMemberSpendTotals(summaryResponse.memberSpendTotals ?? []);
+      setMemberTripTotals(summaryResponse.memberTripTotals ?? []);
       setCategoryCumulative(summaryResponse.categoryCumulative);
       setSimplifyTransfers(trip.trip.simplifyTransfers);
       setLockAfterSettlement(trip.trip.lockAfterSettlement);
@@ -2073,7 +2073,7 @@ export function TripDetailClient({ tripId }: Props) {
 
           <ul className="space-y-2 text-sm">
             {members.map((member) => {
-              const spendRows = memberSpendTotalsByMemberId.get(member.id) ?? [];
+              const spendRows = memberTripTotalsByMemberId.get(member.id) ?? [];
 
               return (
                 <li key={member.id} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2">
@@ -2083,11 +2083,11 @@ export function TripDetailClient({ tripId }: Props) {
                     Expected currency: {member.preferredSettlementCurrency ?? "Original transfer currency"}
                   </p>
                   <p className="text-xs text-muted">
-                    Total spent: {spendRows.length
+                    Trip total (incl. unsettled): {spendRows.length
                       ? spendRows
-                          .map((row) => formatCurrency(row.totalPaidCents, row.currency))
+                          .map((row) => formatCurrency(row.totalTripCents, row.currency))
                           .join(" • ")
-                      : "No recorded spend yet"}
+                      : "No trip share yet"}
                   </p>
                   <p className="text-xs uppercase tracking-wide text-muted">
                     {member.role} {member.joinedAt ? "• joined" : ""}

@@ -2,9 +2,10 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { NextRequest } from "next/server";
 import { requireUser } from "@/server/auth/require-user";
 import { db } from "@/server/db";
-import { expensePayers, expenses, tripMembers, trips } from "@/server/db/schema";
+import { expensePayers, expenses, expenseSplits, tripMembers, trips } from "@/server/db/schema";
 import { getFxQuote } from "@/server/fx/rates";
 import { forbidden, ok, unauthorized } from "@/server/http";
+import { computeSplitAllocations } from "@/server/ledger/split";
 import { computeTripBalances } from "@/server/services/ledger";
 
 type Params = {
@@ -18,10 +19,10 @@ type CurrencySummary = {
   yourNetCents: number;
 };
 
-type MemberSpendSummary = {
+type MemberTripTotalSummary = {
   memberId: string;
   currency: string;
-  totalPaidCents: number;
+  totalTripCents: number;
 };
 
 type CategorySummary = {
@@ -55,6 +56,7 @@ export async function GET(request: NextRequest, context: Params) {
       category: expenses.category,
       currency: expenses.currency,
       amountCents: expenses.amountCents,
+      splitMode: expenses.splitMode,
     })
     .from(expenses)
     .where(and(eq(expenses.tripId, tripId), isNull(expenses.deletedAt)));
@@ -77,6 +79,19 @@ export async function GET(request: NextRequest, context: Params) {
         })
         .from(expensePayers)
         .where(inArray(expensePayers.expenseId, expenseIds))
+    : [];
+
+  const splits = expenseIds.length
+    ? await db
+        .select({
+          expenseId: expenseSplits.expenseId,
+          memberId: expenseSplits.memberId,
+          amountCents: expenseSplits.amountCents,
+          percentageBp: expenseSplits.percentageBp,
+          shares: expenseSplits.shares,
+        })
+        .from(expenseSplits)
+        .where(inArray(expenseSplits.expenseId, expenseIds))
     : [];
 
   const expenseById = new Map(tripExpenses.map((expense) => [expense.id, expense]));
@@ -104,27 +119,45 @@ export async function GET(request: NextRequest, context: Params) {
     );
   }
 
-  const memberSpendByCurrency = new Map<string, number>();
+  const memberTripTotalByCurrency = new Map<string, number>();
 
-  for (const payer of payers) {
-    const expense = expenseById.get(payer.expenseId);
+  const splitsByExpenseId = new Map<string, typeof splits>();
 
-    if (!expense) {
-      continue;
+  for (const split of splits) {
+    if (!splitsByExpenseId.has(split.expenseId)) {
+      splitsByExpenseId.set(split.expenseId, []);
     }
 
-    const key = `${payer.memberId}:${expense.currency}`;
-    memberSpendByCurrency.set(key, (memberSpendByCurrency.get(key) ?? 0) + payer.amountCents);
+    splitsByExpenseId.get(split.expenseId)!.push(split);
   }
 
-  const memberSpendTotals: MemberSpendSummary[] = [...memberSpendByCurrency.entries()]
-    .map(([key, totalPaidCents]) => {
+  for (const expense of tripExpenses) {
+    const expenseSplitsRows = splitsByExpenseId.get(expense.id) ?? [];
+    const allocations = computeSplitAllocations(
+      expense.splitMode,
+      expense.amountCents,
+      expenseSplitsRows.map((split) => ({
+        memberId: split.memberId,
+        amountCents: split.amountCents ?? undefined,
+        percentageBp: split.percentageBp ?? undefined,
+        shares: split.shares ?? undefined,
+      }))
+    );
+
+    for (const [memberId, amountCents] of allocations.entries()) {
+      const key = `${memberId}:${expense.currency}`;
+      memberTripTotalByCurrency.set(key, (memberTripTotalByCurrency.get(key) ?? 0) + amountCents);
+    }
+  }
+
+  const memberTripTotals: MemberTripTotalSummary[] = [...memberTripTotalByCurrency.entries()]
+    .map(([key, totalTripCents]) => {
       const [memberId, currency] = key.split(":");
 
       return {
         memberId,
         currency,
-        totalPaidCents,
+        totalTripCents,
       };
     })
     .sort(
@@ -226,7 +259,7 @@ export async function GET(request: NextRequest, context: Params) {
 
   return ok({
     summaries,
-    memberSpendTotals,
+    memberTripTotals,
     categoryCumulative: {
       currency: defaultCurrency,
       ranked: rankedCategories,
