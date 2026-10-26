@@ -1,6 +1,15 @@
 import { z } from "zod";
 import { COMMON_CURRENCIES, EXPENSE_CATEGORIES } from "@/lib/finance-options";
 
+export const RECEIPT_MIME_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "application/pdf",
+] as const;
+
+const receiptMimeTypeSchema = z.enum(RECEIPT_MIME_TYPES);
+
 export const registerSchema = z.object({
   email: z.string().email(),
   fullName: z.string().min(2).max(200),
@@ -87,7 +96,16 @@ export const receiptPresignSchema = z.object({
   tripId: z.string().min(8),
   expenseId: z.string().min(8),
   fileName: z.string().min(1).max(260),
-  mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "application/pdf"]),
+  mimeType: receiptMimeTypeSchema,
+  sizeBytes: z.number().int().positive().max(20 * 1024 * 1024),
+});
+
+export const receiptCompleteSchema = z.object({
+  tripId: z.string().min(8),
+  expenseId: z.string().min(8),
+  storageKey: z.string().min(5),
+  fileName: z.string().min(1).max(260),
+  mimeType: receiptMimeTypeSchema,
   sizeBytes: z.number().int().positive().max(20 * 1024 * 1024),
 });
 
@@ -95,7 +113,7 @@ export const settlementReceiptPresignSchema = z.object({
   tripId: z.string().min(8),
   settlementId: z.string().min(8),
   fileName: z.string().min(1).max(260),
-  mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "application/pdf"]),
+  mimeType: receiptMimeTypeSchema,
   sizeBytes: z.number().int().positive().max(20 * 1024 * 1024),
 });
 
@@ -104,6 +122,6 @@ export const settlementReceiptCompleteSchema = z.object({
   settlementId: z.string().min(8),
   storageKey: z.string().min(5),
   fileName: z.string().min(1).max(260),
-  mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "application/pdf"]),
+  mimeType: receiptMimeTypeSchema,
   sizeBytes: z.number().int().positive().max(20 * 1024 * 1024),
 });

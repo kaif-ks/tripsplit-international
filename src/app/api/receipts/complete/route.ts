@@ -1,20 +1,11 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { NextRequest } from "next/server";
-import { z } from "zod";
 import { requireUser } from "@/server/auth/require-user";
 import { db } from "@/server/db";
 import { expenses, receipts, tripMembers } from "@/server/db/schema";
 import { badRequest, created, forbidden, unauthorized } from "@/server/http";
-
-const schema = z.object({
-  tripId: z.string().min(8),
-  expenseId: z.string().min(8),
-  storageKey: z.string().min(5),
-  fileName: z.string().min(1).max(260),
-  mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "application/pdf"]),
-  sizeBytes: z.number().int().positive(),
-});
+import { receiptCompleteSchema } from "@/server/validators";
 
 export async function POST(request: NextRequest) {
   const user = await requireUser(request);
@@ -24,7 +15,7 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json();
-  const parsed = schema.safeParse(body);
+  const parsed = receiptCompleteSchema.safeParse(body);
 
   if (!parsed.success) {
     return badRequest(parsed.error.issues[0]?.message ?? "Invalid payload");

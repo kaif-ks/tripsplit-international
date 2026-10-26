@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/client";
@@ -190,6 +191,16 @@ type CategoryBreakdownModal = {
   sharePercent: number;
 };
 
+type ReceiptPreviewModal = {
+  src: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  uploadedByMemberId: string;
+  createdAt: string;
+  contextLabel: string;
+};
+
 type EditablePayer = {
   memberId: string;
   amount: string;
@@ -332,6 +343,10 @@ function formatFxRate(rate: number) {
   return rate.toFixed(6);
 }
 
+function isImageReceiptMimeType(mimeType: string) {
+  return mimeType.startsWith("image/");
+}
+
 export function TripDetailClient({ tripId }: Props) {
   const [tripData, setTripData] = useState<TripData | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -396,6 +411,7 @@ export function TripDetailClient({ tripId }: Props) {
   const [expenseSort, setExpenseSort] = useState<"newest" | "oldest" | "amountDesc" | "amountAsc">("newest");
   const [oweDetailModal, setOweDetailModal] = useState<OweDetailModal | null>(null);
   const [categoryBreakdownModal, setCategoryBreakdownModal] = useState<CategoryBreakdownModal | null>(null);
+  const [receiptPreviewModal, setReceiptPreviewModal] = useState<ReceiptPreviewModal | null>(null);
 
   const memberName = useMemo(() => {
     const map = new Map<string, string>();
@@ -907,6 +923,24 @@ export function TripDetailClient({ tripId }: Props) {
     return () => clearTimeout(timeout);
   }, [toast]);
 
+  useEffect(() => {
+    if (!receiptPreviewModal) {
+      return;
+    }
+
+    const handleEscapeToClose = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setReceiptPreviewModal(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleEscapeToClose);
+
+    return () => {
+      window.removeEventListener("keydown", handleEscapeToClose);
+    };
+  }, [receiptPreviewModal]);
+
   const loadAll = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -1259,6 +1293,66 @@ export function TripDetailClient({ tripId }: Props) {
 
   function closeOweDetailModal() {
     setOweDetailModal(null);
+  }
+
+  function openSettlementReceiptPreview(settlementId: string, receipt: SettlementReceipt) {
+    setReceiptPreviewModal({
+      src: `/api/trips/${tripId}/settlements/${settlementId}/receipts/${receipt.id}`,
+      fileName: receipt.fileName,
+      mimeType: receipt.mimeType,
+      sizeBytes: receipt.sizeBytes,
+      uploadedByMemberId: receipt.uploadedByMemberId,
+      createdAt: receipt.createdAt,
+      contextLabel: "Settlement screenshot",
+    });
+  }
+
+  function openExpenseReceiptPreview(expenseId: string, receipt: ExpenseReceipt) {
+    setReceiptPreviewModal({
+      src: `/api/trips/${tripId}/expenses/${expenseId}/receipts/${receipt.id}`,
+      fileName: receipt.fileName,
+      mimeType: receipt.mimeType,
+      sizeBytes: receipt.sizeBytes,
+      uploadedByMemberId: receipt.uploadedByMemberId,
+      createdAt: receipt.createdAt,
+      contextLabel: "Expense receipt",
+    });
+  }
+
+  function closeReceiptPreviewModal() {
+    setReceiptPreviewModal(null);
+  }
+
+  function renderReceiptThumbnail(options: {
+    src: string;
+    fileName: string;
+    mimeType: string;
+    onOpen: () => void;
+  }) {
+    return (
+      <button
+        type="button"
+        className="group h-14 w-14 overflow-hidden rounded-lg border border-[var(--line)] bg-white shadow-sm transition hover:shadow"
+        onClick={options.onOpen}
+        aria-label={`Open ${options.fileName}`}
+      >
+        {isImageReceiptMimeType(options.mimeType) ? (
+          <Image
+            src={options.src}
+            alt=""
+            width={56}
+            height={56}
+            unoptimized
+            loading="lazy"
+            className="h-full w-full object-cover transition duration-200 group-hover:scale-105"
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center text-[11px] font-semibold text-muted">
+            {options.mimeType === "application/pdf" ? "PDF" : "FILE"}
+          </span>
+        )}
+      </button>
+    );
   }
 
   function closeCategoryBreakdownModal() {
@@ -2297,17 +2391,18 @@ export function TripDetailClient({ tripId }: Props) {
                           {settlement.receipts?.length ? (
                             <div className="mt-2 space-y-1">
                               <p className="text-xs font-semibold uppercase tracking-wide text-muted">Payment screenshot</p>
-                              {settlement.receipts.map((receipt) => (
-                                <a
-                                  key={`pending-incoming-receipt-${settlement.id}-${receipt.id}`}
-                                  className="text-xs text-[var(--accent)] hover:underline"
-                                  href={`/api/trips/${tripId}/settlements/${settlement.id}/receipts/${receipt.id}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                >
-                                  View {receipt.fileName} ({formatFileSize(receipt.sizeBytes)})
-                                </a>
-                              ))}
+                              <div className="mt-1 flex flex-wrap gap-2">
+                                {settlement.receipts.map((receipt) => (
+                                  <div key={`pending-incoming-receipt-${settlement.id}-${receipt.id}`}>
+                                    {renderReceiptThumbnail({
+                                      src: `/api/trips/${tripId}/settlements/${settlement.id}/receipts/${receipt.id}`,
+                                      fileName: receipt.fileName,
+                                      mimeType: receipt.mimeType,
+                                      onOpen: () => openSettlementReceiptPreview(settlement.id, receipt),
+                                    })}
+                                  </div>
+                                ))}
+                              </div>
                             </div>
                           ) : null}
                           <div className="mt-2 flex gap-2">
@@ -2359,17 +2454,18 @@ export function TripDetailClient({ tripId }: Props) {
                           {settlement.receipts?.length ? (
                             <div className="mt-2 space-y-1">
                               <p className="text-xs font-semibold uppercase tracking-wide text-muted">Payment screenshot</p>
-                              {settlement.receipts.map((receipt) => (
-                                <a
-                                  key={`pending-outgoing-receipt-${settlement.id}-${receipt.id}`}
-                                  className="text-xs text-[var(--accent)] hover:underline"
-                                  href={`/api/trips/${tripId}/settlements/${settlement.id}/receipts/${receipt.id}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                >
-                                  View {receipt.fileName} ({formatFileSize(receipt.sizeBytes)})
-                                </a>
-                              ))}
+                              <div className="mt-1 flex flex-wrap gap-2">
+                                {settlement.receipts.map((receipt) => (
+                                  <div key={`pending-outgoing-receipt-${settlement.id}-${receipt.id}`}>
+                                    {renderReceiptThumbnail({
+                                      src: `/api/trips/${tripId}/settlements/${settlement.id}/receipts/${receipt.id}`,
+                                      fileName: receipt.fileName,
+                                      mimeType: receipt.mimeType,
+                                      onOpen: () => openSettlementReceiptPreview(settlement.id, receipt),
+                                    })}
+                                  </div>
+                                ))}
+                              </div>
                             </div>
                           ) : null}
                           <label className="mt-2 block text-xs text-muted">
@@ -2939,17 +3035,18 @@ export function TripDetailClient({ tripId }: Props) {
                       {settlement.receipts?.length ? (
                         <div className="mt-1 space-y-1">
                           <p className="text-xs font-semibold uppercase tracking-wide text-muted">Payment screenshot</p>
-                          {settlement.receipts.map((receipt) => (
-                            <a
-                              key={`history-settlement-receipt-${settlement.id}-${receipt.id}`}
-                              className="block text-xs text-[var(--accent)] hover:underline"
-                              href={`/api/trips/${tripId}/settlements/${settlement.id}/receipts/${receipt.id}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              View {receipt.fileName} ({formatFileSize(receipt.sizeBytes)})
-                            </a>
-                          ))}
+                          <div className="mt-1 flex flex-wrap gap-2">
+                            {settlement.receipts.map((receipt) => (
+                              <div key={`history-settlement-receipt-${settlement.id}-${receipt.id}`}>
+                                {renderReceiptThumbnail({
+                                  src: `/api/trips/${tripId}/settlements/${settlement.id}/receipts/${receipt.id}`,
+                                  fileName: receipt.fileName,
+                                  mimeType: receipt.mimeType,
+                                  onOpen: () => openSettlementReceiptPreview(settlement.id, receipt),
+                                })}
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       ) : null}
                     </div>
@@ -3427,32 +3524,87 @@ export function TripDetailClient({ tripId }: Props) {
             <div className="mt-3 rounded-xl border border-[var(--line)] bg-white p-3 text-sm">
               <p className="mb-2 font-semibold">Receipts</p>
               {viewingExpenseDetail.receipts.length ? (
-                <div className="space-y-2">
+                <>
+                  <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8">
                   {viewingExpenseDetail.receipts.map((receipt) => (
-                    <div key={receipt.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--line)] px-3 py-2">
-                      <div>
-                        <p className="font-medium">{receipt.fileName}</p>
-                        <p className="text-xs text-muted">
-                          {receipt.mimeType} • {formatFileSize(receipt.sizeBytes)} • uploaded by{" "}
-                          {memberName.get(receipt.uploadedByMemberId) ?? receipt.uploadedByMemberId} •{" "}
-                          {new Date(receipt.createdAt).toLocaleString()}
-                        </p>
-                      </div>
-                      <a
-                        className="btn-secondary rounded-lg px-2 py-1 text-xs font-semibold"
-                        href={`/api/trips/${tripId}/expenses/${viewingExpenseId}/receipts/${receipt.id}`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Open
-                      </a>
+                    <div key={receipt.id}>
+                      {renderReceiptThumbnail({
+                        src: `/api/trips/${tripId}/expenses/${viewingExpenseId}/receipts/${receipt.id}`,
+                        fileName: receipt.fileName,
+                        mimeType: receipt.mimeType,
+                        onOpen: () => openExpenseReceiptPreview(viewingExpenseId, receipt),
+                      })}
                     </div>
                   ))}
-                </div>
+                  </div>
+                  <p className="mt-2 text-xs text-muted">Tap any thumbnail to view full size.</p>
+                </>
               ) : (
                 <p className="text-muted">No receipts uploaded for this expense.</p>
               )}
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {receiptPreviewModal ? (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 px-4 py-4 md:py-10"
+          onClick={closeReceiptPreviewModal}
+        >
+          <div
+            className="card w-full max-w-5xl p-4 md:p-5"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-muted">{receiptPreviewModal.contextLabel}</p>
+                <h2 className="text-lg font-semibold md:text-2xl">{receiptPreviewModal.fileName}</h2>
+                <p className="text-xs text-muted">
+                  {receiptPreviewModal.mimeType} • {formatFileSize(receiptPreviewModal.sizeBytes)} • uploaded by{" "}
+                  {memberName.get(receiptPreviewModal.uploadedByMemberId) ?? receiptPreviewModal.uploadedByMemberId} •{" "}
+                  {new Date(receiptPreviewModal.createdAt).toLocaleString()}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn-secondary rounded-xl px-3 py-2 text-xs font-semibold"
+                onClick={closeReceiptPreviewModal}
+              >
+                Close
+              </button>
+            </div>
+
+            {isImageReceiptMimeType(receiptPreviewModal.mimeType) ? (
+              <div className="flex h-[68vh] items-center justify-center overflow-hidden rounded-xl border border-[var(--line)] bg-black/80">
+                <Image
+                  src={receiptPreviewModal.src}
+                  alt={receiptPreviewModal.fileName}
+                  width={1600}
+                  height={1200}
+                  unoptimized
+                  className="max-h-full max-w-full h-auto w-auto object-contain"
+                />
+              </div>
+            ) : receiptPreviewModal.mimeType === "application/pdf" ? (
+              <iframe
+                title={`${receiptPreviewModal.fileName} preview`}
+                src={receiptPreviewModal.src}
+                className="h-[68vh] w-full rounded-xl border border-[var(--line)] bg-white"
+              />
+            ) : (
+              <div className="rounded-xl border border-[var(--line)] bg-white p-4 text-sm text-muted">
+                <p>Inline preview is not available for this file type.</p>
+                <a
+                  className="mt-2 inline-flex rounded-lg border border-[var(--line)] px-3 py-2 text-xs font-semibold text-[var(--accent)] hover:bg-[var(--background)]"
+                  href={receiptPreviewModal.src}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open file in new tab
+                </a>
+              </div>
+            )}
           </div>
         </div>
       ) : null}
